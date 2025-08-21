@@ -259,6 +259,85 @@ class AudioBookBinder:
             return int(match) if match.isdigit() else match.lower()
         return [convert(c) for c in re.split(r'(\d+)', str(text))]
 
+    def clean_disc_references(self, text: str) -> str:
+        """Remove disc/disk references from metadata text"""
+        if not text:
+            return text
+        
+        original_text = text
+        
+        # Define comprehensive patterns for disc references
+        disc_patterns = [
+            # Main disc patterns - be more explicit about boundaries
+            r'\b[Dd]isc\s+\d+\b',          # "Disc 01", "disc 1", etc. (require space)
+            r'\b[Dd]isc\d+\b',             # "Disc01", "disc1", etc. (no space)
+            r'\b[Dd]isk\s+\d+\b',          # "Disk 01", "disk 1", etc.
+            r'\b[Dd]isk\d+\b',             # "Disk01", "disk1", etc.
+            r'\bCD\s*\d+\b',               # "CD1", "CD 01", etc.
+            # Letter variants
+            r'\b[Dd]isc\s*[A-Za-z]\b',     # "DiscA", "Disc A", etc.
+            r'\b[Dd]isk\s*[A-Za-z]\b',     # "DiskA", "Disk A", etc.
+            r'\bCD\s*[A-Za-z]\b',          # "CDA", "CD A", etc.
+            # Common variations
+            r'\b[Dd]isc\s*[IVX]+\b',       # "Disc I", "Disc II", "Disc IV", etc. (Roman numerals)
+            r'\b[Dd]isk\s*[IVX]+\b',       # "Disk I", "Disk II", etc.
+            # Standalone disc references at start/end
+            r'^\s*[Dd]isc\s+\d+\s*[-–—|•]*\s*',  # "Disc 01 - " at start
+            r'\s*[-–—|•]\s*[Dd]isc\s+\d+\s*$',   # " - Disc 01" at end
+        ]
+        
+        if self.settings.verbose_logging:
+            print(f"🔍 DEBUG: Original text: '{text}'")
+        
+        cleaned_text = text
+        patterns_matched = 0
+        
+        # Apply each pattern and track which ones match
+        for i, pattern in enumerate(disc_patterns):
+            old_text = cleaned_text
+            cleaned_text = re.sub(pattern, '', cleaned_text, flags=re.IGNORECASE)
+            
+            if old_text != cleaned_text:
+                patterns_matched += 1
+                if self.settings.verbose_logging:
+                    print(f"🔍 DEBUG: Pattern {i+1} matched: '{pattern}' -> '{old_text}' became '{cleaned_text}'")
+        
+        # Clean up multiple spaces and separators
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
+        cleaned_text = re.sub(r'^\s*[-–—|•]+\s*', '', cleaned_text)  # Leading separators
+        cleaned_text = re.sub(r'\s*[-–—|•]+\s*$', '', cleaned_text)  # Trailing separators
+        cleaned_text = cleaned_text.strip()
+        
+        if self.settings.verbose_logging:
+            print(f"🔍 DEBUG: Final cleaned text: '{cleaned_text}'")
+            print(f"🔍 DEBUG: Patterns matched: {patterns_matched}")
+            print(f"🔍 DEBUG: Length comparison: original={len(original_text)}, cleaned={len(cleaned_text)}")
+        
+        # Check if the original text was mostly disc references
+        is_mostly_disc_reference = (
+            patterns_matched > 0 and 
+            (len(cleaned_text) == 0 or len(cleaned_text) < len(original_text) * 0.3)
+        )
+        
+        if self.settings.verbose_logging:
+            print(f"🔍 DEBUG: Is mostly disc reference: {is_mostly_disc_reference}")
+        
+        # Handle the case where we cleaned out disc references but result is too short
+        if len(cleaned_text.strip()) < 3:
+            if is_mostly_disc_reference:
+                # If the original text was mostly disc references, return a generic placeholder
+                # This will be handled by the fallback logic in extract_metadata
+                if self.settings.verbose_logging:
+                    print(f"🔍 DEBUG: Original was mostly disc references, returning empty for fallback handling")
+                return ""  # Empty string will trigger folder name fallback
+            else:
+                # If it wasn't mostly disc references, keep original
+                if self.settings.verbose_logging:
+                    print(f"🔍 DEBUG: Cleaned text too short and not mostly disc references, returning original")
+                return original_text
+        
+        return cleaned_text
+
     def sanitize_filename(self, text: str) -> str:
         """Enhanced filename sanitization"""
         if not text:
@@ -384,20 +463,20 @@ class AudioBookBinder:
             if 'TPE1' in audio:
                 artist_text = safe_extract_text(audio['TPE1'])
                 if artist_text:
-                    metadata['artist'] = artist_text
+                    metadata['artist'] = self.clean_disc_references(artist_text)
             elif 'TPE2' in audio:
                 artist_text = safe_extract_text(audio['TPE2'])
                 if artist_text:
-                    metadata['artist'] = artist_text
+                    metadata['artist'] = self.clean_disc_references(artist_text)
                 
             if 'TALB' in audio:
                 album_text = safe_extract_text(audio['TALB'])
                 if album_text:
-                    metadata['title'] = album_text
+                    metadata['title'] = self.clean_disc_references(album_text)
             elif 'TIT2' in audio:
                 title_text = safe_extract_text(audio['TIT2'])
                 if title_text:
-                    metadata['title'] = title_text
+                    metadata['title'] = self.clean_disc_references(title_text)
                 
             if 'TCON' in audio:
                 genre_text = safe_extract_text(audio['TCON'])
@@ -420,12 +499,48 @@ class AudioBookBinder:
                 import traceback
                 traceback.print_exc()
         
-        # Use folder name as fallback for missing artist/title
+        # Smart fallback strategy for missing artist/title
+        # Priority: 1) Main book folder name, 2) Cleaned subfolder name, 3) Raw folder name
+        
+        # Clean folder name of disc references before using as fallback
+        cleaned_folder_name = self.clean_disc_references(folder_name)
+        
+        # Check if file is in a subfolder (multi-disc structure)
+        file_parent = mp3_file.parent
+        if file_parent != book_folder:
+            # File is in subfolder - check if subfolder contains disc references
+            subfolder_name = file_parent.name
+            cleaned_subfolder_name = self.clean_disc_references(subfolder_name)
+            
+            # Debug output
+            if self.settings.verbose_logging:
+                print(f"🔍 DEBUG: file_parent={file_parent}")
+                print(f"🔍 DEBUG: book_folder={book_folder}")
+                print(f"🔍 DEBUG: subfolder_name='{subfolder_name}'")
+                print(f"🔍 DEBUG: cleaned_subfolder_name='{cleaned_subfolder_name}'")
+                print(f"🔍 DEBUG: cleaned_folder_name='{cleaned_folder_name}'")
+                print(f"🔍 DEBUG: length comparison: {len(cleaned_subfolder_name)} < {len(subfolder_name) * 0.5} = {len(cleaned_subfolder_name) < len(subfolder_name) * 0.5}")
+            
+            # If subfolder had disc references and was cleaned significantly, prefer main folder
+            if len(cleaned_subfolder_name) < len(subfolder_name) * 0.5:  # More than 50% was cleaned
+                preferred_name = cleaned_folder_name
+                if self.settings.verbose_logging:
+                    print(f"📁 Using main folder name '{preferred_name}' over disc subfolder '{subfolder_name}'")
+            else:
+                preferred_name = cleaned_subfolder_name
+                if self.settings.verbose_logging:
+                    print(f"📁 Using cleaned subfolder name '{preferred_name}' from '{subfolder_name}'")
+        else:
+            preferred_name = cleaned_folder_name
+            if self.settings.verbose_logging:
+                print(f"📁 Using folder name '{preferred_name}' (no subfolder)")
+        
+        # Use preferred name as fallback for missing artist/title
         if not metadata['artist']:
-            metadata['artist'] = folder_name
+            metadata['artist'] = preferred_name
             
         if not metadata['title']:
-            metadata['title'] = folder_name
+            metadata['title'] = preferred_name
             
         return metadata
 
@@ -655,7 +770,7 @@ class AudioBookBinder:
                 # Calculate total size
                 total_size = sum(f.stat().st_size for f in audio_files)
                 
-                # Extract metadata
+                # Extract metadata (now automatically cleans disc references)
                 metadata = self.extract_metadata(audio_files[0], item)
                 
                 # Find cover art
@@ -671,7 +786,7 @@ class AudioBookBinder:
                     else:
                         processing = f"Re-encode ({current_bitrate}→{self.settings.max_bitrate} kbps)"
                 
-                # Generate output filename with length limits
+                # Generate output filename with length limits (metadata already cleaned)
                 artist = self.sanitize_filename(metadata['artist'])
                 title = self.sanitize_filename(metadata['title'])
                 
