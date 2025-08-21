@@ -747,7 +747,7 @@ class AudioBookBinder:
             print("8. Exit")
             print()
             
-            choice = input("Choice [1-8 or Enter to start]: ").strip()
+            choice = input("Choice [1-8 or Enter to start]: ").strip().replace('\r', '')
             
             # Default to start processing on Enter
             if choice == "" or choice == "7":
@@ -1351,6 +1351,14 @@ class AudioBookBinder:
                         parts.append(f"📡 {progress.bitrate}")
                     progress_msg = f"[{thread_name}] {' | '.join(parts)}"
                     print(f"\r{progress_msg}", end="", flush=True)
+    
+    def cleanup_terminal_state(self):
+        """Clean up terminal state after progress display"""
+        # Ensure we're on a new line and reset any terminal escape sequences
+        print("\r" + " " * 100 + "\r", end="", flush=True)  # Clear current line
+        print("", flush=True)  # Move to new line and flush
+        # Reset terminal to normal state
+        print("\033[0m", end="", flush=True)
 
     def format_duration(self, seconds: float) -> str:
         """Format duration in seconds to HH:MM:SS format"""
@@ -1705,8 +1713,12 @@ class AudioBookBinder:
             # Sequential processing (original logic)
             successful, failed = self._process_books_sequential()
         
-        # Final summary
+        # Final summary with terminal cleanup
         elapsed_time = time.time() - start_time
+        
+        # Clean up terminal state after processing
+        self.cleanup_terminal_state()
+        
         print(f"\n" + "=" * 70)
         print(f"🎉 Batch Processing Complete!")
         print(f"✅ Successful: {successful}")
