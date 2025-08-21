@@ -52,13 +52,18 @@ from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 import threading
 import time
+import uuid
+import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 @dataclass
 class ProcessingSettings:
     """Configuration settings for audio processing"""
     max_bitrate: int = 192
     processing_mode: str = "fast"  # "fast" or "quality"
-    multi_threading: bool = True
+    multi_threading: bool = True  # FFmpeg internal threading
+    parallel_books: bool = True  # Parallel book processing
+    max_parallel_books: Optional[int] = None  # Manual override (None = auto n-2)
     remove_commas: bool = True
     chapter_style: str = "auto"  # "auto", "sequential", "filename"
     sanitization_level: str = "aggressive"  # "basic", "aggressive"
@@ -115,6 +120,9 @@ class AudioBookBinder:
         
         # Discovered audiobooks
         self.discovered_books: List[AudioBookInfo] = []
+        
+        # Thread-safe output lock for parallel processing
+        self._output_lock = threading.Lock()
 
     def load_settings(self) -> ProcessingSettings:
         """Load settings from config file or create defaults"""
@@ -137,6 +145,8 @@ class AudioBookBinder:
             'max_bitrate': self.settings.max_bitrate,
             'processing_mode': self.settings.processing_mode,
             'multi_threading': self.settings.multi_threading,
+            'parallel_books': self.settings.parallel_books,
+            'max_parallel_books': self.settings.max_parallel_books,
             'remove_commas': self.settings.remove_commas,
             'chapter_style': self.settings.chapter_style,
             'sanitization_level': self.settings.sanitization_level,
@@ -150,6 +160,98 @@ class AudioBookBinder:
         
         with open(config_file, 'w') as f:
             json.dump(config_data, f, indent=2)
+
+    def get_optimal_worker_count(self) -> int:
+        """Calculate optimal number of worker threads for parallel book processing"""
+        if self.settings.max_parallel_books is not None:
+            # Use manual override if set
+            return max(1, self.settings.max_parallel_books)
+        
+        # Auto-calculate: use n-2 cores with minimum of 1
+        cpu_count = os.cpu_count() or 1
+        optimal = max(1, cpu_count - 2)
+        
+        return optimal
+
+    def create_thread_name(self, book_info: AudioBookInfo) -> str:
+        """Create a 16-character thread name from book title/name"""
+        # Use book title from metadata first, fall back to folder name
+        source_name = book_info.metadata.get('title', '').strip()
+        if not source_name:
+            source_name = book_info.name
+        
+        # Remove common words and articles to preserve important parts
+        words_to_remove = ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by']
+        words = source_name.lower().split()
+        filtered_words = [w for w in words if w not in words_to_remove]
+        
+        # If we removed too many words, use original
+        if not filtered_words:
+            filtered_words = source_name.split()
+        
+        # Join words and remove special characters
+        clean_name = ''.join(filtered_words)
+        # Keep only alphanumeric characters
+        clean_name = re.sub(r'[^a-zA-Z0-9]', '', clean_name)
+        
+        # Capitalize first letter of each original word for readability
+        if len(filtered_words) > 1:
+            result = ""
+            char_idx = 0
+            for word in filtered_words:
+                word_clean = re.sub(r'[^a-zA-Z0-9]', '', word)
+                if word_clean:
+                    if result == "":  # First word
+                        result += word_clean.capitalize()
+                    else:
+                        result += word_clean.capitalize()
+            clean_name = result
+        else:
+            clean_name = clean_name.capitalize()
+        
+        # Ensure we have something
+        if not clean_name:
+            clean_name = "AudioBook"
+        
+        # Truncate or pad to exactly 16 characters
+        if len(clean_name) > 16:
+            clean_name = clean_name[:16]
+        elif len(clean_name) < 16:
+            # Pad with numbers if too short
+            padding_needed = 16 - len(clean_name)
+            # Try adding book index or random numbers
+            clean_name = clean_name + "_" * min(padding_needed, 1)
+            if len(clean_name) < 16:
+                remaining = 16 - len(clean_name)
+                clean_name = clean_name + str(hash(book_info.name) % (10**remaining)).zfill(remaining)
+        
+        return clean_name[:16]  # Ensure exactly 16 characters
+
+    def thread_safe_print(self, *args, **kwargs):
+        """Thread-safe print function for parallel processing"""
+        with self._output_lock:
+            print(*args, **kwargs)
+
+    def thread_safe_progress_print(self, message: str, thread_id: str = None):
+        """Thread-safe progress printing with thread identification"""
+        if thread_id is None:
+            thread_id = threading.current_thread().name or str(threading.current_thread().ident)
+        
+        with self._output_lock:
+            print(f"[{thread_id}] {message}")
+
+    def toggle_parallel_processing(self):
+        """Toggle parallel book processing setting"""
+        self.settings.parallel_books = not self.settings.parallel_books
+        self.save_settings()
+        
+        if self.settings.parallel_books:
+            worker_count = self.get_optimal_worker_count()
+            print(f"✓ Parallel book processing enabled ({worker_count} workers)")
+        else:
+            print("✓ Parallel book processing disabled")
+        
+        time.sleep(1)
 
     def natural_sort_key(self, text):
         """Natural sorting for alphanumeric strings"""
@@ -623,23 +725,32 @@ class AudioBookBinder:
             print(f"  Max Bitrate: {self.settings.max_bitrate} kbps")
             print(f"  Processing Mode: {self.settings.processing_mode.title()} Mode")
             print(f"  Multi-threading: {'Enabled' if self.settings.multi_threading else 'Disabled'}")
+            
+            # Show parallel processing info
+            if self.settings.parallel_books:
+                max_workers = self.get_optimal_worker_count()
+                print(f"  Parallel Books: Enabled ({max_workers} workers)")
+            else:
+                print(f"  Parallel Books: Disabled")
+                
             print(f"  Remove Commas: {'Yes' if self.settings.remove_commas else 'No'}")
             print(f"  Sanitization: {self.settings.sanitization_level.title()}")
             print()
             print("Options:")
             print("1. Change max bitrate")
             print("2. Toggle processing mode (Fast/Quality)")  
-            print("3. Toggle multi-threading")
-            print("4. Advanced settings")
-            print("5. Preview discovery results")
-            print("6. Start processing")
-            print("7. Exit")
+            print("3. Toggle multi-threading (FFmpeg)")
+            print("4. Toggle parallel book processing")
+            print("5. Advanced settings")
+            print("6. Preview discovery results")
+            print("7. Start processing")
+            print("8. Exit")
             print()
             
-            choice = input("Choice [1-7 or Enter to start]: ").strip()
+            choice = input("Choice [1-8 or Enter to start]: ").strip()
             
             # Default to start processing on Enter
-            if choice == "" or choice == "6":
+            if choice == "" or choice == "7":
                 if self.discovered_books:
                     return True  # Start processing
                 else:
@@ -653,10 +764,12 @@ class AudioBookBinder:
                 self.settings.multi_threading = not self.settings.multi_threading
                 self.save_settings()
             elif choice == "4":
-                self.advanced_settings_menu()
+                self.toggle_parallel_processing()
             elif choice == "5":
+                self.advanced_settings_menu()
+            elif choice == "6":
                 self.show_discovery_results()
-            elif choice == "7":
+            elif choice == "8":
                 return False  # Exit
             else:
                 print("Invalid choice. Please try again.")
@@ -1047,9 +1160,12 @@ class AudioBookBinder:
     
     def create_robust_concat_file(self, audio_files: List[Path]) -> str:
         """Create a robust concat file with proper path handling"""
-        # Create temp file in a predictable location
+        # Create temp file in a predictable location with thread-safe naming
         temp_dir = Path(tempfile.gettempdir())
-        concat_file_path = temp_dir / f"audiobook_concat_{os.getpid()}_{int(time.time())}.txt"
+        thread_id = threading.current_thread().ident or 0
+        random_suffix = random.randint(1000, 9999)
+        timestamp = int(time.time() * 1000000)  # microsecond precision
+        concat_file_path = temp_dir / f"audiobook_concat_{os.getpid()}_{thread_id}_{timestamp}_{random_suffix}.txt"
         
         try:
             with open(concat_file_path, 'w', encoding='utf-8', newline='\n') as f:
@@ -1154,18 +1270,27 @@ class AudioBookBinder:
         
         return False
 
-    def display_progress(self, progress: ConversionProgress):
-        """Display conversion progress based on style setting"""
+    def display_progress(self, progress: ConversionProgress, thread_name: str = None):
+        """Display conversion progress based on style setting (thread-safe)"""
         if self.settings.progress_style == "off" or not self.settings.show_progress:
             return
         
-        # Clear the current line and move cursor to beginning
-        print('\r', end='')
+        if thread_name is None:
+            thread_name = threading.current_thread().name
+        
+        # Check if we're in parallel processing mode
+        is_parallel = self.settings.parallel_books and len(self.discovered_books) > 1
         
         if self.settings.progress_style == "simple":
             # Simple percentage display
             if progress.percentage > 0:
-                print(f"Progress: {progress.percentage:.1f}%", end='', flush=True)
+                progress_msg = f"[{thread_name}] Progress: {progress.percentage:.1f}%"
+                if is_parallel:
+                    # Parallel: use thread-safe print (new lines)
+                    self.thread_safe_print(progress_msg)
+                else:
+                    # Sequential: update in place
+                    print(f"\r{progress_msg}", end="", flush=True)
         
         elif self.settings.progress_style == "detailed":
             # Detailed progress with ETA
@@ -1189,24 +1314,43 @@ class AudioBookBinder:
                 if progress.speed > 0:
                     speed_str = f" | {progress.speed:.1f}x"
                 
-                print(f"{bar} {progress.percentage:.1f}% ({current_str}/{total_str}){eta_str}{speed_str}", 
-                      end='', flush=True)
+                progress_msg = f"[{thread_name}] {bar} {progress.percentage:.1f}% ({current_str}/{total_str}){eta_str}{speed_str}"
+                
+                if is_parallel:
+                    # Parallel: use thread-safe print (new lines)
+                    self.thread_safe_print(progress_msg)
+                else:
+                    # Sequential: update in place
+                    print(f"\r{progress_msg}", end="", flush=True)
         
         elif self.settings.progress_style == "verbose":
             # Verbose progress with all details
             if progress.percentage > 0:
-                # Multi-line verbose display
-                print(f"\n📊 Progress: {progress.percentage:.1f}%")
-                print(f"⏱️  Time: {self.format_duration(progress.current_time)} / {self.format_duration(progress.total_time)}")
-                if progress.speed > 0:
-                    print(f"🚀 Speed: {progress.speed:.1f}x")
-                if progress.eta_seconds > 0 and progress.eta_seconds < 36000:
-                    print(f"⏳ ETA: {self.format_duration(progress.eta_seconds)}")
-                if progress.bitrate:
-                    print(f"📡 Bitrate: {progress.bitrate}")
-                if progress.file_size:
-                    print(f"💾 Size: {progress.file_size}")
-                print("=" * 40, end='', flush=True)
+                if is_parallel:
+                    # Multi-line verbose display for parallel (thread-safe)
+                    self.thread_safe_print(f"[{thread_name}] 📊 Progress: {progress.percentage:.1f}%")
+                    self.thread_safe_print(f"[{thread_name}] ⏱️  Time: {self.format_duration(progress.current_time)} / {self.format_duration(progress.total_time)}")
+                    if progress.speed > 0:
+                        self.thread_safe_print(f"[{thread_name}] 🚀 Speed: {progress.speed:.1f}x")
+                    if progress.eta_seconds > 0 and progress.eta_seconds < 36000:
+                        self.thread_safe_print(f"[{thread_name}] ⏳ ETA: {self.format_duration(progress.eta_seconds)}")
+                    if progress.bitrate:
+                        self.thread_safe_print(f"[{thread_name}] 📡 Bitrate: {progress.bitrate}")
+                    if progress.file_size:
+                        self.thread_safe_print(f"[{thread_name}] 💾 Size: {progress.file_size}")
+                    self.thread_safe_print(f"[{thread_name}] " + "=" * 40)
+                else:
+                    # Single-line compact display for sequential
+                    parts = [f"📊 {progress.percentage:.1f}%"]
+                    parts.append(f"⏱️ {self.format_duration(progress.current_time)}/{self.format_duration(progress.total_time)}")
+                    if progress.speed > 0:
+                        parts.append(f"🚀 {progress.speed:.1f}x")
+                    if progress.eta_seconds > 0 and progress.eta_seconds < 36000:
+                        parts.append(f"⏳ {self.format_duration(progress.eta_seconds)}")
+                    if progress.bitrate:
+                        parts.append(f"📡 {progress.bitrate}")
+                    progress_msg = f"[{thread_name}] {' | '.join(parts)}"
+                    print(f"\r{progress_msg}", end="", flush=True)
 
     def format_duration(self, seconds: float) -> str:
         """Format duration in seconds to HH:MM:SS format"""
@@ -1227,6 +1371,10 @@ class AudioBookBinder:
             current_book=current_book,
             total_books=total_books
         )
+        
+        # Determine update frequency based on processing mode
+        is_parallel = self.settings.parallel_books and len(self.discovered_books) > 1
+        update_interval = 3.0 if is_parallel else 0.5  # Less frequent updates for parallel processing
         
         try:
             # Start FFmpeg process
@@ -1250,15 +1398,16 @@ class AudioBookBinder:
                     
                     # Parse progress information
                     if self.parse_ffmpeg_progress(output, progress):
-                        # Update display every 0.5 seconds to avoid spam
+                        # Update display based on processing mode
                         current_time = time.time()
-                        if current_time - last_update >= 0.5:
+                        if current_time - last_update >= update_interval:
                             self.display_progress(progress)
                             last_update = current_time
                     
-                    # Log verbose output if enabled
+                    # Log verbose output if enabled (thread-safe)
                     if self.settings.verbose_logging:
-                        print(f"\nFFmpeg: {output}")
+                        thread_name = threading.current_thread().name
+                        self.thread_safe_print(f"[{thread_name}] FFmpeg: {output}")
             
             # Final progress update
             if self.settings.show_progress and self.settings.progress_style != "off":
@@ -1266,7 +1415,9 @@ class AudioBookBinder:
                     progress.percentage = 100.0
                     progress.current_time = progress.total_time
                 self.display_progress(progress)
-                print()  # New line after progress
+                # Add newline for sequential mode to separate from next output
+                if not is_parallel:
+                    print()
             
             # Check return code
             return_code = process.poll()
@@ -1278,8 +1429,16 @@ class AudioBookBinder:
 
     def create_m4b(self, book_info: AudioBookInfo, current_book: int = 1, total_books: int = 1) -> bool:
         """Create M4B file with enhanced processing for QuickLook compatibility"""
-        print(f"\n🎵 Processing: {book_info.name}")
-        print("=" * 60)
+        thread_name = threading.current_thread().name
+        thread_id = threading.current_thread().ident
+        
+        # Thread-safe output for debugging
+        self.thread_safe_print(f"\n🎵 [{thread_name}] Processing: {book_info.name}")
+        self.thread_safe_print(f"[{thread_name}] Book path: {book_info.path}")
+        self.thread_safe_print(f"[{thread_name}] Files: {len(book_info.files)} MP3s")
+        if self.settings.verbose_logging:
+            self.thread_safe_print(f"[{thread_name}] First file: {book_info.files[0] if book_info.files else 'None'}")
+        self.thread_safe_print("=" * 60)
         
         # Always use AAC encoding for QuickLook compatibility
         # QuickLook requires AAC audio in M4A/M4B containers
@@ -1521,7 +1680,7 @@ class AudioBookBinder:
             return False
 
     def process_all_audiobooks(self) -> Tuple[int, int]:
-        """Process all discovered audiobooks"""
+        """Process all discovered audiobooks with optional parallel processing"""
         if not self.discovered_books:
             print("❌ No audiobooks to process!")
             return 0, 0
@@ -1530,9 +1689,37 @@ class AudioBookBinder:
         failed = 0
         
         print(f"\n🚀 Starting batch processing of {len(self.discovered_books)} audiobooks...")
+        if self.settings.parallel_books:
+            worker_count = self.get_optimal_worker_count()
+            print(f"⚡ Parallel processing: {worker_count} workers")
+        else:
+            print("🔄 Sequential processing")
         print("=" * 70)
         
         start_time = time.time()
+        
+        if self.settings.parallel_books and len(self.discovered_books) > 1:
+            # Parallel processing using ThreadPoolExecutor
+            successful, failed = self._process_books_parallel()
+        else:
+            # Sequential processing (original logic)
+            successful, failed = self._process_books_sequential()
+        
+        # Final summary
+        elapsed_time = time.time() - start_time
+        print(f"\n" + "=" * 70)
+        print(f"🎉 Batch Processing Complete!")
+        print(f"✅ Successful: {successful}")
+        print(f"❌ Failed: {failed}")
+        print(f"⏱️  Total time: {self.format_time(elapsed_time)}")
+        print(f"📁 Output files saved to: {self.output_dir}")
+        
+        return successful, failed
+
+    def _process_books_sequential(self) -> Tuple[int, int]:
+        """Process audiobooks sequentially (original behavior)"""
+        successful = 0
+        failed = 0
         
         for i, book_info in enumerate(self.discovered_books, 1):
             print(f"\n[{i}/{len(self.discovered_books)}] 📚 {book_info.name}")
@@ -1551,14 +1738,87 @@ class AudioBookBinder:
                 print(f"❌ Unexpected error: {e}")
                 failed += 1
         
-        # Final summary
-        elapsed_time = time.time() - start_time
-        print(f"\n" + "=" * 70)
-        print(f"🎉 Batch Processing Complete!")
-        print(f"✅ Successful: {successful}")
-        print(f"❌ Failed: {failed}")
-        print(f"⏱️  Total time: {self.format_time(elapsed_time)}")
-        print(f"📁 Output files saved to: {self.output_dir}")
+        return successful, failed
+
+    def _process_books_parallel(self) -> Tuple[int, int]:
+        """Process audiobooks in parallel using ThreadPoolExecutor"""
+        successful = 0
+        failed = 0
+        
+        # Thread-safe counters
+        completed_count = threading.Lock()
+        results = []
+        
+        def process_single_book(book_data: Tuple[int, AudioBookInfo]) -> bool:
+            """Process a single audiobook (thread worker function)"""
+            book_index, book_info = book_data
+            
+            # Set custom thread name based on book title
+            custom_thread_name = self.create_thread_name(book_info)
+            threading.current_thread().name = custom_thread_name
+            
+            # Limit FFmpeg threads per worker to prevent CPU oversubscription
+            if self.settings.multi_threading:
+                # Temporarily disable multi-threading for individual workers
+                # since we're already parallelizing at the book level
+                original_threading = self.settings.multi_threading
+                self.settings.multi_threading = False
+                
+                try:
+                    success = self.create_m4b(book_info, current_book=book_index, 
+                                            total_books=len(self.discovered_books))
+                finally:
+                    # Restore original threading setting
+                    self.settings.multi_threading = original_threading
+                
+                return success
+            else:
+                return self.create_m4b(book_info, current_book=book_index, 
+                                     total_books=len(self.discovered_books))
+        
+        # Create thread pool with optimal worker count
+        max_workers = self.get_optimal_worker_count()
+        
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="AudioBookWorker") as executor:
+                # Submit all jobs
+                book_data = [(i+1, book) for i, book in enumerate(self.discovered_books)]
+                future_to_book = {
+                    executor.submit(process_single_book, data): data 
+                    for data in book_data
+                }
+                
+                # Process completed jobs as they finish
+                for future in as_completed(future_to_book):
+                    book_index, book_info = future_to_book[future]
+                    
+                    try:
+                        success = future.result()
+                        
+                        with completed_count:
+                            if success:
+                                successful += 1
+                                print(f"\n✅ [{book_index}/{len(self.discovered_books)}] Completed: {book_info.output_filename}")
+                            else:
+                                failed += 1
+                                print(f"\n❌ [{book_index}/{len(self.discovered_books)}] Failed: {book_info.output_filename}")
+                        
+                    except KeyboardInterrupt:
+                        print(f"\n⚠️  Processing interrupted by user")
+                        # Cancel remaining futures
+                        for remaining_future in future_to_book:
+                            remaining_future.cancel()
+                        break
+                    except Exception as e:
+                        with completed_count:
+                            failed += 1
+                            print(f"\n❌ [{book_index}/{len(self.discovered_books)}] Error: {book_info.name} - {e}")
+        
+        except Exception as e:
+            print(f"❌ Error setting up parallel processing: {e}")
+            # Fall back to sequential processing
+            print("🔄 Falling back to sequential processing...")
+            return self._process_books_sequential()
         
         return successful, failed
 
