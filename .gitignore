@@ -30,7 +30,8 @@ MANIFEST
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
-*.spec
+# Keep audiobook_binder.spec but ignore others
+# *.spec
 
 # Installer logs
 pip-log.txt
@@ -218,6 +219,10 @@ $RECYCLE.BIN/
 AudioBooks/
 # Output directory - contains generated M4B files
 Output/
+# Virtual environment for this project
+audiobook_env/
+# Brand fix utility (excluded from repository)
+fix_m4b_brand.py
 
 # Configuration files with potentially sensitive data
 .audiobook_binder_config.json

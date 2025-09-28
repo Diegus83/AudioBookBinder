@@ -123,6 +123,12 @@ class AudioBookBinder:
         
         # Thread-safe output lock for parallel processing
         self._output_lock = threading.Lock()
+        
+        # Cancellation system for immediate stop functionality
+        self.cancellation_event = threading.Event()
+        self.current_process = None
+        self.current_output_file = None
+        self._process_lock = threading.Lock()
 
     def load_settings(self) -> ProcessingSettings:
         """Load settings from config file or create defaults"""
@@ -858,11 +864,11 @@ class AudioBookBinder:
             print("4. Toggle parallel book processing")
             print("5. Advanced settings")
             print("6. Preview discovery results")
-            print("7. Start processing")
+            print("7. Start processing ⭐ (Default - just press Enter)")
             print("8. Exit")
             print()
             
-            choice = input("Choice [1-8 or Enter to start]: ").strip().replace('\r', '')
+            choice = input("Choice [1-8 or just press Enter to start]: ").strip().replace('\r', '')
             
             # Default to start processing on Enter
             if choice == "" or choice == "7":
@@ -1486,9 +1492,67 @@ class AudioBookBinder:
         
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
+    def terminate_current_process(self) -> bool:
+        """Safely terminate the active FFmpeg process"""
+        with self._process_lock:
+            if self.current_process is None:
+                return True
+            
+            try:
+                # Try graceful termination first
+                self.current_process.terminate()
+                
+                # Wait up to 3 seconds for graceful exit
+                try:
+                    self.current_process.wait(timeout=3)
+                    if self.settings.verbose_logging:
+                        print(f"✓ Process terminated gracefully")
+                    return True
+                except subprocess.TimeoutExpired:
+                    # Force kill if graceful termination fails
+                    if self.settings.verbose_logging:
+                        print(f"⚠️ Graceful termination failed, force killing...")
+                    self.current_process.kill()
+                    self.current_process.wait()
+                    if self.settings.verbose_logging:
+                        print(f"✓ Process force killed")
+                    return True
+                    
+            except Exception as e:
+                if self.settings.verbose_logging:
+                    print(f"❌ Error terminating process: {e}")
+                return False
+            finally:
+                self.current_process = None
+
+    def cleanup_cancelled_processing(self, output_file: Path) -> None:
+        """Clean up after processing cancellation"""
+        try:
+            # Remove partial output file if it exists
+            if output_file and output_file.exists():
+                output_file.unlink()
+                if self.settings.verbose_logging:
+                    print(f"🧹 Cleaned up partial output file: {output_file}")
+        except Exception as e:
+            if self.settings.verbose_logging:
+                print(f"⚠️ Error cleaning up output file: {e}")
+    
+    def cancel_processing(self) -> None:
+        """Cancel all processing immediately"""
+        # Set the cancellation event
+        self.cancellation_event.set()
+        
+        # Terminate current process if running
+        self.terminate_current_process()
+        
+        # Clean up current output file if set
+        if hasattr(self, 'current_output_file') and self.current_output_file:
+            self.cleanup_cancelled_processing(self.current_output_file)
+
     def run_ffmpeg_with_progress(self, cmd: List[str], total_duration: float, 
-                                current_book: int, total_books: int) -> bool:
-        """Run FFmpeg with real-time progress tracking"""
+                                current_book: int, total_books: int, 
+                                progress_callback=None) -> bool:
+        """Run FFmpeg with real-time progress tracking with cancellation support"""
         progress = ConversionProgress(
             total_time=total_duration,
             current_book=current_book,
@@ -1509,9 +1573,19 @@ class AudioBookBinder:
                 bufsize=1
             )
             
+            # Track the current process for cancellation
+            with self._process_lock:
+                self.current_process = process
+            
             # Track progress in real-time
             last_update = time.time()
             while True:
+                # Check for cancellation first
+                if self.cancellation_event.is_set():
+                    self.terminate_current_process()
+                    print(f"\n⚠️  Processing cancelled by user")
+                    return False
+                
                 output = process.stdout.readline()
                 if output == '' and process.poll() is not None:
                     break
@@ -1524,7 +1598,12 @@ class AudioBookBinder:
                         # Update display based on processing mode
                         current_time = time.time()
                         if current_time - last_update >= update_interval:
-                            self.display_progress(progress)
+                            if progress_callback:
+                                # Send progress to GUI callback
+                                progress_callback(progress)
+                            else:
+                                # Send progress to console (existing behavior)
+                                self.display_progress(progress)
                             last_update = current_time
                     
                     # Log verbose output if enabled (thread-safe)
@@ -1639,7 +1718,7 @@ class AudioBookBinder:
         
         # Set correct brand for M4B audiobook format
         cmd.extend(['-movflags', '+faststart'])
-        cmd.extend(['-brand', 'M4B '])  # M4B brand for audiobooks
+        cmd.extend(['-brand', 'mp42'])  # Standard MP4 brand for compatibility
         
         # Audiobook-specific metadata
         cmd.extend(['-metadata', f'title={book_info.metadata["title"]}'])
@@ -1689,8 +1768,9 @@ class AudioBookBinder:
             # Calculate total duration for progress tracking
             total_duration = self.calculate_total_duration(book_info.files)
             
-            # Run FFmpeg with progress monitoring
-            success = self.run_ffmpeg_with_progress(cmd, total_duration, current_book, total_books)
+            # Run FFmpeg with progress monitoring (pass through any progress callback)
+            progress_callback = getattr(self, '_progress_callback', None)
+            success = self.run_ffmpeg_with_progress(cmd, total_duration, current_book, total_books, progress_callback)
             
             if not success:
                 print(f"❌ Error: FFmpeg conversion failed")
