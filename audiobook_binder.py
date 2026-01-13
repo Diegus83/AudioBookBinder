@@ -543,10 +543,27 @@ class AudioBookBinder:
         
         # Use preferred name as fallback for missing artist/title
         if not metadata['artist']:
-            metadata['artist'] = preferred_name
+            metadata['artist'] = preferred_name.split('-')[0].strip() # Fallback to first part before hyphen
             
         if not metadata['title']:
-            metadata['title'] = preferred_name
+            # Fallback to second part after hyphen (if present) and strip any trailing year like "(1999)" or "1999"
+            if '-' in preferred_name:
+                title_candidate = preferred_name.split('-', 1)[1].strip()
+            else:
+                title_candidate = preferred_name.strip()
+            
+            # Remove common year patterns at the end: "(YYYY)", "[YYYY]", "- YYYY", ", YYYY", or just " YYYY"
+            title_candidate = re.sub(r'\s*[\(\[\-]?\s*(?:19|20)\d{2}\s*[\)\]\-]?\s*$', '', title_candidate).strip()
+            metadata['title'] = title_candidate
+
+        if not metadata['year']:
+            # Try to extract year from folder name
+            year_match = re.search(r'\b(19|20)\d{2}\b', preferred_name)
+            if year_match:
+                metadata['year'] = year_match.group()
+            
+        if not metadata['album']:
+            metadata['album'] = metadata['title']
             
         return metadata
 
