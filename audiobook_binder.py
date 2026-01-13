@@ -1203,6 +1203,8 @@ class AudioBookBinder:
     def create_chapter_file(self, audio_files: List[Path]) -> str:
         """Create chapter file for FFmpeg"""
         chapter_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+
+        chapter_file.write(f";FFMETADATA1\n\n")
         
         current_time = 0
         for i, audio_file in enumerate(audio_files):
@@ -1685,7 +1687,7 @@ class AudioBookBinder:
             cover_input_index = 1
         
         # Input 2/1: Chapter file (always last input)
-        cmd.extend(['-i', chapter_file])
+        cmd.extend(['-f','ffmetadata','-i', chapter_file])
         chapter_input_index = 2 if cover_input_index is not None else 1
         
         # STREAM MAPPING (after all inputs declared)
