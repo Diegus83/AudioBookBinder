@@ -856,6 +856,10 @@ class AudioBookBinder:
                 
             print(f"  Remove Commas: {'Yes' if self.settings.remove_commas else 'No'}")
             print(f"  Sanitization: {self.settings.sanitization_level.title()}")
+            # Show selected audio encoder
+            encoder_display = getattr(self.settings, 'audio_encoder', 'aac')
+            encoder_label = 'Builtin AAC (aac_low)' if encoder_display == 'aac' else 'libfdk_aac (aac_he)'
+            print(f"  Audio encoder: {encoder_label}")
             print()
             print("Options:")
             print("1. Change max bitrate")
@@ -943,9 +947,13 @@ class AudioBookBinder:
             print(f"5. Verbose logging: {'On' if self.settings.verbose_logging else 'Off'}")
             print(f"6. Progress display: {self.settings.progress_style.title()}")
             print(f"7. Show progress: {'On' if self.settings.show_progress else 'Off'}")
-            print("8. Back to main menu")
-            
-            choice = input("\nChoice [1-8]: ").strip()
+            # Audio encoder option (saved to config)
+            encoder_display = getattr(self.settings, 'audio_encoder', 'aac')
+            encoder_label = 'Builtin AAC (aac_low)' if encoder_display == 'aac' else 'libfdk_aac (aac_he)'
+            print(f"8. Audio encoder: {encoder_label}")
+            print("9. Back to main menu")
+
+            choice = input("\nChoice [1-9]: ").strip()
             
             if choice == "1":
                 self.change_chapter_style()
@@ -965,6 +973,8 @@ class AudioBookBinder:
                 self.settings.show_progress = not self.settings.show_progress
                 self.save_settings()
             elif choice == "8":
+                self.toggle_audio_encoder()
+            elif choice == "9":
                 break
             else:
                 print("Invalid choice")
@@ -1002,6 +1012,18 @@ class AudioBookBinder:
             self.settings.cover_art_quality = "optimized"
         else:
             self.settings.cover_art_quality = "original"
+        self.save_settings()
+        time.sleep(1)
+
+    def toggle_audio_encoder(self):
+        """Toggle audio encoder between builtin AAC and libfdk_aac (HE profile)"""
+        current = getattr(self.settings, 'audio_encoder', 'aac')
+        if current == 'libfdk_aac':
+            self.settings.audio_encoder = 'aac'
+            print("✓ Audio encoder set to builtin AAC (aac_low)")
+        else:
+            self.settings.audio_encoder = 'libfdk_aac'
+            print("✓ Audio encoder set to libfdk_aac (aac_he)")
         self.save_settings()
         time.sleep(1)
 
@@ -1701,9 +1723,16 @@ class AudioBookBinder:
         
         # ENCODING OPTIONS FOR QUICKLOOK COMPATIBILITY
         # Always use AAC audio encoding for QuickLook compatibility
-        cmd.extend(['-c:a', 'aac', '-b:a', f'{target_bitrate}k'])
-        # Use AAC-LC profile for maximum compatibility
-        cmd.extend(['-profile:a', 'aac_low'])
+        # Choose encoder/profile based on user setting (defaults to builtin AAC)
+        audio_encoder = getattr(self.settings, 'audio_encoder', 'aac')
+        if audio_encoder == 'libfdk_aac':
+            # Use libfdk_aac with HE profile when available
+            cmd.extend(['-c:a', 'libfdk_aac', '-b:a', f'{target_bitrate}k','-afterburner', '1'])
+            cmd.extend(['-profile:a', 'aac_he'])
+        else:
+            # Default: builtin AAC (AAC-LC) for maximum compatibility
+            cmd.extend(['-c:a', 'aac', '-b:a', f'{target_bitrate}k'])
+            cmd.extend(['-profile:a', 'aac_low'])
         
         # Video encoding for cover art (use PNG codec for better compatibility)
         if cover_input_index is not None:
