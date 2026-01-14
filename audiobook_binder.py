@@ -73,6 +73,7 @@ class ProcessingSettings:
     custom_ffmpeg_options: str = ""
     show_progress: bool = True  # Show conversion progress
     progress_style: str = "detailed"  # "off", "simple", "detailed", "verbose"
+    audio_encoder: str = "aac"  # 'aac' or 'libfdk_aac'
 
 @dataclass
 class ConversionProgress:
@@ -109,6 +110,22 @@ class AudioBookBinder:
         
         # Load settings
         self.settings = self.load_settings()
+        # Cache ffmpeg libfdk_aac availability to avoid repeated checks
+        # and inform the user early if their saved setting requires libfdk_aac
+        try:
+            self.ffmpeg_has_libfdk = self._ffmpeg_has_libfdk()
+        except Exception:
+            self.ffmpeg_has_libfdk = False
+
+        if getattr(self.settings, 'audio_encoder', 'aac') == 'libfdk_aac' and not self.ffmpeg_has_libfdk:
+            print("⚠️  Warning: Your configuration selects 'libfdk_aac' but the installed ffmpeg does not appear to support it.")
+            print("   Reverting to builtin AAC (aac_low) and saving configuration.")
+            # Revert to safe default and persist
+            try:
+                self.settings.audio_encoder = 'aac'
+                self.save_settings()
+            except Exception:
+                pass
         
         # Cover art patterns
         self.cover_patterns = [
@@ -161,7 +178,8 @@ class AudioBookBinder:
             'verbose_logging': self.settings.verbose_logging,
             'custom_ffmpeg_options': self.settings.custom_ffmpeg_options,
             'show_progress': self.settings.show_progress,
-            'progress_style': self.settings.progress_style
+            'progress_style': self.settings.progress_style,
+            'audio_encoder': getattr(self.settings, 'audio_encoder', 'aac')
         }
         
         with open(config_file, 'w') as f:
@@ -1019,13 +1037,40 @@ class AudioBookBinder:
         """Toggle audio encoder between builtin AAC and libfdk_aac (HE profile)"""
         current = getattr(self.settings, 'audio_encoder', 'aac')
         if current == 'libfdk_aac':
+            # Switch back to builtin AAC
             self.settings.audio_encoder = 'aac'
             print("✓ Audio encoder set to builtin AAC (aac_low)")
-        else:
+            self.save_settings()
+            time.sleep(1)
+            return
+
+        # User is attempting to enable libfdk_aac; check ffmpeg support first
+        if self._ffmpeg_has_libfdk():
             self.settings.audio_encoder = 'libfdk_aac'
             print("✓ Audio encoder set to libfdk_aac (aac_he)")
+        else:
+            # Inform the user and keep LC-AAC
+            print("⚠️  ffmpeg was not built with libfdk_aac support. Staying with builtin AAC (aac_low).")
+            self.settings.audio_encoder = 'aac'
+
         self.save_settings()
         time.sleep(1)
+
+    def _ffmpeg_has_libfdk(self) -> bool:
+        """Check whether the installed ffmpeg has libfdk_aac encoder available.
+
+        Returns True if libfdk_aac is listed in `ffmpeg -encoders`, False otherwise.
+        """
+        try:
+            # Run ffmpeg and list encoders
+            result = subprocess.run([
+                'ffmpeg', '-hide_banner', '-encoders'
+            ], capture_output=True, text=True, check=True)
+
+            stdout = result.stdout or result.stderr or ''
+            return 'libfdk_aac' in stdout
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
 
     def change_progress_style(self):
         """Change progress display style"""
@@ -1666,6 +1711,14 @@ class AudioBookBinder:
             self.thread_safe_print(f"[{thread_name}] First file: {book_info.files[0] if book_info.files else 'None'}")
         self.thread_safe_print("=" * 60)
         
+        # Strict mode: if user selected libfdk_aac but ffmpeg no longer supports it,
+        # abort early with a clear error so the user can fix or switch settings.
+        if getattr(self.settings, 'audio_encoder', 'aac') == 'libfdk_aac':
+            if not self._ffmpeg_has_libfdk():
+                print("❌ Error: configured audio encoder 'libfdk_aac' is not available in the installed ffmpeg.")
+                print("   Install an ffmpeg build with libfdk_aac or switch the audio encoder in Advanced Settings.")
+                return False
+
         # Always use AAC encoding for QuickLook compatibility
         # QuickLook requires AAC audio in M4A/M4B containers
         current_bitrate = book_info.format_info['bitrate']
