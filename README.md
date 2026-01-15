@@ -20,12 +20,14 @@ A powerful, feature-rich Python script that converts MP3 audiobooks to M4B forma
 - **Chapter Naming**: Auto, Sequential, or Filename-based
 - **Sanitization Levels**: Basic or Aggressive filename cleaning
 - **Cover Art Quality**: Original or Optimized for smaller file sizes
+- **Audio Codec**: AAC-LC or **HE-AAC** for better quality at low bitrates
 
 ## 🚀 Key Features
 
 - **Multi-structure Support**: Single-folder and multi-disc audiobook structures
 - **Natural Sorting**: Proper alphanumeric sorting (Chapter1, Chapter2, Chapter10)
 - **Metadata Preservation**: Extracts and preserves artist, title, genre, year
+- **Folder-name Metadata Parsing**: If MP3 tags are missing, parses metadata from the audiobook folder name using customizable templates
 - **Enhanced Cover Art**: Finds folder images OR extracts from MP3 metadata
 - **Intelligent Quality**: Never upscales - only maintains or reduces bitrate
 - **Filename Sanitization**: Removes commas, special characters for clean names
@@ -186,6 +188,21 @@ Proceed with processing? [Y/n]:
 - **Original**: Maintains original cover art resolution and quality
 - **Optimized**: Scales to 500x500 for smaller file sizes
 
+### Audio Codec Options
+- **AAC-LC**: Default, widely compatible.
+- **HE-AAC**: More efficient at low bitrates (typically best for ~64–96 kb/s), with good compatibility in modern players.
+
+### Folder Name Metadata Parsing
+If MP3 metadata is missing or incomplete, AudioBook Binder can fall back to parsing metadata from the audiobook folder name.
+
+- **Customizable templates** let you define your naming convention.
+- **Preview + edit** in interactive mode so you can verify and adjust before processing.
+
+**Example templates:**
+- `{artist} - {title} - {year}`
+- `{artist} - {title}`
+- `{year} - {artist} - {title}`
+
 ## 🔧 Command Line Arguments
 
 ```bash
@@ -233,6 +250,13 @@ brew install ffmpeg
 # Restart terminal after installation
 ```
 
+**"libfdk_aac encoder not available" / HE-AAC selected but not supported**
+Using Homebrew (FFmpeg with FDK AAC support):
+```bash
+brew tap homebrew-ffmpeg/ffmpeg
+brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-fdk-aac
+```
+
 **"No module named 'mutagen'"**
 ```bash
 pip3 install mutagen
@@ -260,7 +284,10 @@ Settings are automatically saved to `~/.audiobook_binder_config.json`:
   "chapter_style": "auto",
   "sanitization_level": "aggressive",
   "cover_art_quality": "original",
-  "verbose_logging": false
+  "verbose_logging": false,
+  "audio_codec": "aac_lc",
+  "folder_metadata_template": ["artist","title","year"],
+  "folder_metadata_separator": " - "
 }
 ```
 

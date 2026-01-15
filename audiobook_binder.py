@@ -48,7 +48,8 @@ import shutil
 from pathlib import Path
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, APIC
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import itertools
 from typing import List, Dict, Optional, Tuple
 import threading
 import time
@@ -73,7 +74,10 @@ class ProcessingSettings:
     custom_ffmpeg_options: str = ""
     show_progress: bool = True  # Show conversion progress
     progress_style: str = "detailed"  # "off", "simple", "detailed", "verbose"
-    audio_encoder: str = "aac"  # 'aac' or 'libfdk_aac'
+    audio_codec: str = "aac"  # 'aac' or 'libfdk_aac'
+    # Folder metadata template: token order and delimiter
+    folder_metadata_template: List[str] = field(default_factory=lambda: ['artist', 'title', 'year'])
+    folder_metadata_delimiter: str = " - "
 
 @dataclass
 class ConversionProgress:
@@ -117,12 +121,12 @@ class AudioBookBinder:
         except Exception:
             self.ffmpeg_has_libfdk = False
 
-        if getattr(self.settings, 'audio_encoder', 'aac') == 'libfdk_aac' and not self.ffmpeg_has_libfdk:
+        if getattr(self.settings, 'audio_codec', 'aac') == 'libfdk_aac' and not self.ffmpeg_has_libfdk:
             print("⚠️  Warning: Your configuration selects 'libfdk_aac' but the installed ffmpeg does not appear to support it.")
             print("   Reverting to builtin AAC (aac_low) and saving configuration.")
             # Revert to safe default and persist
             try:
-                self.settings.audio_encoder = 'aac'
+                self.settings.audio_codec = 'aac'
                 self.save_settings()
             except Exception:
                 pass
@@ -179,7 +183,9 @@ class AudioBookBinder:
             'custom_ffmpeg_options': self.settings.custom_ffmpeg_options,
             'show_progress': self.settings.show_progress,
             'progress_style': self.settings.progress_style,
-            'audio_encoder': getattr(self.settings, 'audio_encoder', 'aac')
+            'audio_codec': getattr(self.settings, 'audio_codec', 'aac'),
+            'folder_metadata_template': getattr(self.settings, 'folder_metadata_template', ['artist', 'title', 'year']),
+            'folder_metadata_delimiter': getattr(self.settings, 'folder_metadata_delimiter', ' - ')
         }
         
         with open(config_file, 'w') as f:
@@ -528,6 +534,67 @@ class AudioBookBinder:
         
         # Clean folder name of disc references before using as fallback
         cleaned_folder_name = self.clean_disc_references(folder_name)
+
+        # Helper to parse folder name into tokens (artist, title, year)
+        def parse_folder_tokens(name: str) -> Dict[str, str]:
+            result = {'artist': '', 'title': '', 'year': ''}
+            if not name:
+                return result
+
+            # Use user-configured separator and token order when possible
+            sep = getattr(self.settings, 'folder_metadata_delimiter', ' - ')
+            order = getattr(self.settings, 'folder_metadata_template', ['artist', 'title', 'year'])
+
+            parts = [p.strip() for p in name.split(sep) if p.strip()]
+            if len(parts) == len(order):
+                for k, v in zip(order, parts):
+                    result[k] = v
+                return result
+
+            # Try common separators if user separator didn't match
+            common_seps = [' - ', ' | ', ' / ', ' – ', ' — ', '-', '|', '/']
+            for s in common_seps:
+                if s in name:
+                    parts = [p.strip() for p in name.split(s) if p.strip()]
+                    # If last part looks like a year, use it
+                    if parts and re.search(r'\b(19|20)\d{2}\b', parts[-1]):
+                        result['year'] = parts[-1]
+                        parts = parts[:-1]
+
+                    if len(parts) >= 2:
+                        result['artist'] = parts[0]
+                        result['title'] = ' '.join(parts[1:])
+                        return result
+
+            # Try to extract a year anywhere in the string
+            m = re.search(r'((?:19|20)\d{2})', name)
+            if m:
+                result['year'] = m.group(1)
+                # Remove year and try splitting remaining by common separators
+                cleaned = re.sub(re.escape(result['year']), '', name)
+                cleaned = re.sub(r'[\(\)\[\]]', '', cleaned)
+                parts = [p.strip() for p in re.split(r'[-|/]', cleaned) if p.strip()]
+                if len(parts) >= 2:
+                    result['artist'] = parts[0]
+                    result['title'] = parts[1]
+                    return result
+
+            # Last resort: split on whitespace or assign whole string to title
+            parts = name.split()
+            if len(parts) >= 3:
+                # Heuristic: first token(s) as artist if comma present
+                if ',' in name:
+                    p = [p.strip() for p in name.split(',', 1)]
+                    result['artist'] = p[0]
+                    result['title'] = p[1] if len(p) > 1 else ''
+                else:
+                    # Assume first token is artist, rest is title
+                    result['artist'] = parts[0]
+                    result['title'] = ' '.join(parts[1:])
+            else:
+                result['title'] = name.strip()
+
+            return result
         
         # Check if file is in a subfolder (multi-disc structure)
         file_parent = mp3_file.parent
@@ -548,6 +615,44 @@ class AudioBookBinder:
             # If subfolder had disc references and was cleaned significantly, prefer main folder
             if len(cleaned_subfolder_name) < len(subfolder_name) * 0.5:  # More than 50% was cleaned
                 preferred_name = cleaned_folder_name
+
+                # If artist/title missing, try to parse folder name into tokens
+                def parse_folder_tokens(name: str) -> Dict[str, str]:
+                    # Attempt strict split using user-preferred separator first
+                    sep = getattr(self.settings, 'folder_metadata_delimiter', ' - ')
+                    order = getattr(self.settings, 'folder_metadata_template', ['artist', 'title', 'year'])
+                    parts = [p.strip() for p in name.split(sep) if p.strip()]
+                    result = {t: '' for t in ['artist', 'title', 'year']}
+                    # Exact match
+                    if len(parts) == len(order):
+                        for tok, part in zip(order, parts):
+                            result[tok] = part
+                        return result
+
+                    # Fallback: split on common separators
+                    parts = [p.strip() for p in re.split(r'\s*[-–—|/:,]\s*', name) if p.strip()]
+
+                    # Try to extract year (4-digit) from the name if present
+                    year = None
+                    m = re.search(r"\b(19\d{2}|20\d{2})\b", name)
+                    if m:
+                        year = m.group(1)
+                        result['year'] = year
+
+                    if len(parts) >= 2:
+                        # Map first two parts to the first two tokens in order
+                        result[order[0]] = parts[0]
+                        result[order[1]] = parts[1]
+                        if len(parts) >= 3 and len(order) >= 3:
+                            result[order[2]] = parts[2]
+                    elif len(parts) == 1:
+                        result[order[0]] = parts[0]
+                    else:
+                        # Last resort: put entire cleaned name into the first token
+                        result[order[0]] = name
+
+                    return result
+
                 if self.settings.verbose_logging:
                     print(f"📁 Using main folder name '{preferred_name}' over disc subfolder '{subfolder_name}'")
             else:
@@ -559,12 +664,15 @@ class AudioBookBinder:
             if self.settings.verbose_logging:
                 print(f"📁 Using folder name '{preferred_name}' (no subfolder)")
         
-        # Use preferred name as fallback for missing artist/title
-        if not metadata['artist']:
-            metadata['artist'] = preferred_name
-            
-        if not metadata['title']:
-            metadata['title'] = preferred_name
+        # Use preferred name as fallback for missing artist/title/year
+        if not metadata['artist'] or not metadata['title'] or not metadata['year']:
+            parsed = parse_folder_tokens(preferred_name)
+            if not metadata['artist'] and parsed.get('artist'):
+                metadata['artist'] = parsed.get('artist')
+            if not metadata['title'] and parsed.get('title'):
+                metadata['title'] = parsed.get('title')
+            if not metadata['year'] and parsed.get('year'):
+                metadata['year'] = parsed.get('year')
             
         return metadata
 
@@ -875,7 +983,7 @@ class AudioBookBinder:
             print(f"  Remove Commas: {'Yes' if self.settings.remove_commas else 'No'}")
             print(f"  Sanitization: {self.settings.sanitization_level.title()}")
             # Show selected audio encoder
-            encoder_display = getattr(self.settings, 'audio_encoder', 'aac')
+            encoder_display = getattr(self.settings, 'audio_codec', 'aac')
             encoder_label = 'Builtin AAC (aac_low)' if encoder_display == 'aac' else 'libfdk_aac (aac_he)'
             print(f"  Audio encoder: {encoder_label}")
             print()
@@ -966,12 +1074,13 @@ class AudioBookBinder:
             print(f"6. Progress display: {self.settings.progress_style.title()}")
             print(f"7. Show progress: {'On' if self.settings.show_progress else 'Off'}")
             # Audio encoder option (saved to config)
-            encoder_display = getattr(self.settings, 'audio_encoder', 'aac')
+            encoder_display = getattr(self.settings, 'audio_codec', 'aac')
             encoder_label = 'Builtin AAC (aac_low)' if encoder_display == 'aac' else 'libfdk_aac (aac_he)'
             print(f"8. Audio encoder: {encoder_label}")
-            print("9. Back to main menu")
+            print("9. Filename token order & separator")
+            print("0. Back to main menu")
 
-            choice = input("\nChoice [1-9]: ").strip()
+            choice = input("\nChoice [1-0]: ").strip()
             
             if choice == "1":
                 self.change_chapter_style()
@@ -993,6 +1102,8 @@ class AudioBookBinder:
             elif choice == "8":
                 self.toggle_audio_encoder()
             elif choice == "9":
+                self.change_filename_token_settings()
+            elif choice == "0":
                 break
             else:
                 print("Invalid choice")
@@ -1035,26 +1146,137 @@ class AudioBookBinder:
 
     def toggle_audio_encoder(self):
         """Toggle audio encoder between builtin AAC and libfdk_aac (HE profile)"""
-        current = getattr(self.settings, 'audio_encoder', 'aac')
+        current = getattr(self.settings, 'audio_codec', 'aac')
         if current == 'libfdk_aac':
             # Switch back to builtin AAC
-            self.settings.audio_encoder = 'aac'
-            print("✓ Audio encoder set to builtin AAC (aac_low)")
+            self.settings.audio_codec = 'aac'
+            print("✓ Audio codec set to builtin AAC (aac_low)")
             self.save_settings()
             time.sleep(1)
             return
 
         # User is attempting to enable libfdk_aac; check ffmpeg support first
         if self._ffmpeg_has_libfdk():
-            self.settings.audio_encoder = 'libfdk_aac'
-            print("✓ Audio encoder set to libfdk_aac (aac_he)")
+            self.settings.audio_codec = 'libfdk_aac'
+            print("✓ Audio codec set to libfdk_aac (aac_he)")
         else:
             # Inform the user and keep LC-AAC
             print("⚠️  ffmpeg was not built with libfdk_aac support. Staying with builtin AAC (aac_low).")
-            self.settings.audio_encoder = 'aac'
+            self.settings.audio_codec = 'aac'
 
         self.save_settings()
         time.sleep(1)
+
+    def change_filename_token_settings(self):
+        """Allow user to change token order (artist/title/year) and separator"""
+        allowed_tokens = ['artist', 'title', 'year']
+        shorthand_map = {'a': 'artist', 't': 'title', 'y': 'year'}  # case-sensitive
+
+        def build_template_from_settings():
+            order = getattr(self.settings, 'folder_metadata_template', allowed_tokens)
+            sep = getattr(self.settings, 'folder_metadata_delimiter', ' - ')
+            return sep.join([f"{{{t}}}" for t in order])
+
+        while True:
+            self.clear_screen()
+            print("🔤 Filename Template Settings")
+            print("=" * 30)
+            current_template = build_template_from_settings()
+            print(f"Current template: {current_template}")
+            print(f"Available tokens: {', '.join(['{'+t+'}' for t in allowed_tokens])}")
+            print(f"Shorthand letters: {', '.join([k+':'+v for k,v in shorthand_map.items()])} (case-sensitive)")
+            print()
+            print("Enter a template using either full tokens ({artist}) or shorthand letters (a-t-y).")
+            print("Any text in [brackets] will be ignored. Leave empty to cancel.")
+            user = input("Template: ").strip()
+            if user == "":
+                print("Cancelled")
+                time.sleep(1)
+                break
+
+            # Remove bracketed text (and surrounding spaces)
+            cleaned = re.sub(r"\[.*?\]", "", user)
+
+            # First try full-token syntax {token}
+            if '{' in cleaned:
+                found = re.findall(r"\{([^}]+)\}", cleaned)
+                if not found:
+                    print("❌ No tokens found in template. Use tokens like {artist}.")
+                    time.sleep(1)
+                    continue
+
+                # Validate tokens
+                unknown = [t for t in found if t not in allowed_tokens]
+                if unknown:
+                    print(f"❌ Unknown tokens: {unknown}. Allowed: {allowed_tokens}")
+                    time.sleep(2)
+                    continue
+
+                # Check duplicates
+                if len(found) != len(set(found)):
+                    dup = [t for t in set(found) if found.count(t) > 1]
+                    print(f"❌ Duplicate tokens found in template: {dup}")
+                    time.sleep(2)
+                    continue
+
+                # Infer separator from text between {tokens}
+                parts = re.split(r"\{[^}]+\}", cleaned)
+                middles = [p for p in parts[1:-1] if p.strip() != '']
+                if middles:
+                    sep = middles[0].strip()
+                else:
+                    sep = getattr(self.settings, 'folder_metadata_delimiter', ' - ')
+
+                # Persist
+                self.settings.folder_metadata_template = found
+                self.settings.folder_metadata_delimiter = sep
+                self.save_settings()
+                print(f"✓ Template saved. Token order: {found}, Separator: '{sep}'")
+                time.sleep(1)
+                break
+
+            # Else try shorthand letters (case-sensitive)
+            # Find single-letter tokens (letters separated by non-word or boundaries)
+            letters = re.findall(r"\b([A-Za-z])\b", cleaned)
+            if not letters:
+                print("❌ No shorthand tokens found. Use letters like a, t, y or full tokens {artist}.")
+                time.sleep(1)
+                continue
+
+            # Validate letters: must be in shorthand_map and match case
+            unknown_letters = [l for l in letters if l not in shorthand_map]
+            if unknown_letters:
+                print(f"❌ Unknown shorthand tokens: {unknown_letters}. Allowed: {list(shorthand_map.keys())}")
+                time.sleep(2)
+                continue
+
+            # Check duplicates
+            if len(letters) != len(set(letters)):
+                dup = [l for l in set(letters) if letters.count(l) > 1]
+                print(f"❌ Duplicate shorthand tokens found: {dup}")
+                time.sleep(2)
+                continue
+
+            # Build token order from letters
+            found_tokens = [shorthand_map[l] for l in letters]
+
+            # Infer separator: replace single-letter tokens with a marker and split
+            marker = "{X}"
+            temp = re.sub(r"\b([A-Za-z])\b", marker, cleaned)
+            parts = temp.split(marker)
+            middles = [p for p in parts[1:-1] if p.strip() != '']
+            if middles:
+                sep = middles[0].strip()
+            else:
+                sep = getattr(self.settings, 'folder_metadata_delimiter', ' - ')
+
+            # Persist
+            self.settings.folder_metadata_template = found_tokens
+            self.settings.folder_metadata_delimiter = sep
+            self.save_settings()
+            print(f"✓ Template saved. Token order: {found_tokens}, Separator: '{sep}'")
+            time.sleep(1)
+            break
 
     def _ffmpeg_has_libfdk(self) -> bool:
         """Check whether the installed ffmpeg has libfdk_aac encoder available.
@@ -1713,7 +1935,7 @@ class AudioBookBinder:
         
         # Strict mode: if user selected libfdk_aac but ffmpeg no longer supports it,
         # abort early with a clear error so the user can fix or switch settings.
-        if getattr(self.settings, 'audio_encoder', 'aac') == 'libfdk_aac':
+        if getattr(self.settings, 'audio_codec', 'aac') == 'libfdk_aac':
             if not self._ffmpeg_has_libfdk():
                 print("❌ Error: configured audio encoder 'libfdk_aac' is not available in the installed ffmpeg.")
                 print("   Install an ffmpeg build with libfdk_aac or switch the audio encoder in Advanced Settings.")
@@ -1777,8 +1999,8 @@ class AudioBookBinder:
         # ENCODING OPTIONS FOR QUICKLOOK COMPATIBILITY
         # Always use AAC audio encoding for QuickLook compatibility
         # Choose encoder/profile based on user setting (defaults to builtin AAC)
-        audio_encoder = getattr(self.settings, 'audio_encoder', 'aac')
-        if audio_encoder == 'libfdk_aac':
+        audio_codec = getattr(self.settings, 'audio_codec', 'aac')
+        if audio_codec == 'libfdk_aac':
             # Use libfdk_aac with HE profile when available
             cmd.extend(['-c:a', 'libfdk_aac', '-b:a', f'{target_bitrate}k','-afterburner', '1'])
             cmd.extend(['-profile:a', 'aac_he'])
