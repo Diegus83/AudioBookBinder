@@ -20,7 +20,7 @@ A powerful, feature-rich Python script that converts MP3 audiobooks to M4B forma
 - **Chapter Naming**: Auto, Sequential, or Filename-based
 - **Sanitization Levels**: Basic or Aggressive filename cleaning
 - **Cover Art Quality**: Original or Optimized for smaller file sizes
-- **Audio Codec**: AAC-LC or **HE-AAC** for better quality at low bitrates
+- **Audio Codec**: AAC-LC or HE-AAC for better quality at low bitrates
 
 ## 🚀 Key Features
 
@@ -104,7 +104,7 @@ AudioBooks/
 │   ├── 02-Chapter2.mp3
 │   ├── 03-Chapter3.mp3
 │   └── cover.jpg
-└── J.K. Rowling - Harry Potter Book 1/
+└── Craig Alanson - Expeditionary Force Book 1/
     ├── Part1.mp3
     ├── Part2.mp3
     └── folder.png
@@ -190,7 +190,7 @@ Proceed with processing? [Y/n]:
 
 ### Audio Codec Options
 - **AAC-LC**: Default, widely compatible.
-- **HE-AAC**: More efficient at low bitrates (typically best for ~64–96 kb/s), with good compatibility in modern players.
+- **HE-AAC**: More efficient at low bitrates , with good compatibility in modern players.
 
 ### Folder Name Metadata Parsing
 If MP3 metadata is missing or incomplete, AudioBook Binder can fall back to parsing metadata from the audiobook folder name.
