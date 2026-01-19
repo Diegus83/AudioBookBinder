@@ -2,8 +2,6 @@
 """
 AudioBook Binder - Enhanced MP3 to M4B Converter
 
-🔧 FULLY FIXED VERSION - All Major Issues Resolved!
-
 Latest Fixes Applied (v2.2 - QuickLook Compatible):
 - FIXED: QuickLook compatibility - always use AAC encoding for M4A/M4B containers
 - FIXED: M4B brand identifier for proper audiobook recognition
@@ -28,7 +26,7 @@ Previous Fixes (v2.0):
 Features:
 - Interactive menu system with customizable settings
 - QuickLook compatible M4B files (AAC audio, proper metadata)
-- Multi-core FFmpeg support with proper error handling
+- Parallel processing support (concurrent book workers); FFmpeg manages internal threading automatically
 - Discovery preview with detailed file analysis
 - Enhanced cover art handling with folder/embedded priority
 - Quality and Fast processing modes
@@ -62,7 +60,6 @@ class ProcessingSettings:
     """Configuration settings for audio processing"""
     max_bitrate: int = 192
     processing_mode: str = "fast"  # "fast" or "quality"
-    multi_threading: bool = True  # FFmpeg internal threading
     parallel_books: bool = True  # Parallel book processing
     max_parallel_books: Optional[int] = None  # Manual override (None = auto n-2)
     remove_commas: bool = True
@@ -174,7 +171,6 @@ class AudioBookBinder:
         config_data = {
             'max_bitrate': self.settings.max_bitrate,
             'processing_mode': self.settings.processing_mode,
-            'multi_threading': self.settings.multi_threading,
             'parallel_books': self.settings.parallel_books,
             'max_parallel_books': self.settings.max_parallel_books,
             'remove_commas': self.settings.remove_commas,
@@ -1028,15 +1024,13 @@ class AudioBookBinder:
             print(f"Current Settings:")
             print(f"  Max Bitrate: {self.settings.max_bitrate} kbps")
             print(f"  Processing Mode: {self.settings.processing_mode.title()} Mode")
-            print(f"  Multi-threading: {'Enabled' if self.settings.multi_threading else 'Disabled'}")
-            
             # Show parallel processing info
             if self.settings.parallel_books:
                 max_workers = self.get_optimal_worker_count()
                 print(f"  Parallel Books: Enabled ({max_workers} workers)")
             else:
                 print(f"  Parallel Books: Disabled")
-                
+
             print(f"  Remove Commas: {'Yes' if self.settings.remove_commas else 'No'}")
             print(f"  Sanitization: {self.settings.sanitization_level.title()}")
             # Show selected audio encoder
@@ -1056,20 +1050,19 @@ class AudioBookBinder:
             print()
             print("Options:")
             print("1. Change max bitrate")
-            print("2. Toggle processing mode (Fast/Quality)")  
-            print("3. Toggle multi-threading (FFmpeg)")
-            print("4. Toggle parallel book processing")
-            print("5. Output filename format")
-            print("6. Advanced settings")
-            print("7. Preview discovery results")
-            print("8. Start processing ⭐ (Default - just press Enter)")
+            print("2. Toggle processing mode (Fast/Quality)")
+            print("3. Toggle parallel book processing")
+            print("4. Output filename format")
+            print("5. Advanced settings")
+            print("6. Preview discovery results")
+            print("7. Start processing ⭐ (Default - just press Enter)")
             print("0. Exit")
             print()
-            
-            choice = input("Choice [1-9 or just press Enter to start]: ").strip().replace('\r', '')
-            
-            # Default to start processing on Enter (now option #8)
-            if choice == "" or choice == "8":
+
+            choice = input("Choice [1-7 or just press Enter to start]: ").strip().replace('\r', '')
+
+            # Default to start processing on Enter
+            if choice == "" or choice == "7":
                 if self.discovered_books:
                     return True  # Start processing
                 else:
@@ -1080,15 +1073,12 @@ class AudioBookBinder:
             elif choice == "2":
                 self.toggle_processing_mode()
             elif choice == "3":
-                self.settings.multi_threading = not self.settings.multi_threading
-                self.save_settings()
-            elif choice == "4":
                 self.toggle_parallel_processing()
-            elif choice == "5":
+            elif choice == "4":
                 self.change_output_filename_format()
-            elif choice == "6":
+            elif choice == "5":
                 self.advanced_settings_menu()
-            elif choice == "7":
+            elif choice == "6":
                 self.show_discovery_results()
             elif choice == "0":
                 return False  # Exit
@@ -2165,12 +2155,6 @@ class AudioBookBinder:
         # Build FFmpeg command optimized for QuickLook compatibility
         cmd = ['ffmpeg']
         
-        # Determine threads to pass to FFmpeg.
-        # Priority: explicit `ffmpeg_threads` argument > settings.multi_threading
-        # When multi_threading is True and ffmpeg_threads is None -> use 0 (auto)
-        # When multi_threading is False and ffmpeg_threads is None -> use 1 (force single-thread)
-        threads_to_use = ffmpeg_threads if ffmpeg_threads is not None else (0 if self.settings.multi_threading else 1)
-        cmd.extend(['-threads', str(threads_to_use)])
         
         # ALL INPUTS FIRST (this is critical for FFmpeg)
         # Input 0: Audio files via concat
@@ -2468,15 +2452,12 @@ class AudioBookBinder:
             # Set custom thread name based on book title
             custom_thread_name = self.create_thread_name(book_info)
             threading.current_thread().name = custom_thread_name
-            # Avoid mutating shared settings inside worker threads. Instead,
-            # pass an explicit per-worker thread limit to create_m4b.
-            per_worker_threads = 1 if self.settings.multi_threading else None
+            # Avoid mutating shared settings inside worker threads.
             try:
                 return self.create_m4b(
                     book_info,
                     current_book=book_index,
-                    total_books=len(self.discovered_books),
-                    ffmpeg_threads=per_worker_threads
+                    total_books=len(self.discovered_books)
                 )
             except Exception:
                 return False

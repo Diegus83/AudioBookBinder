@@ -12,7 +12,7 @@ A powerful, feature-rich Python script that converts MP3 audiobooks to M4B forma
 ### ⚡ Smart Processing
 - **Fast Mode**: Stream copy when possible (no re-encoding for compatible files)
 - **Quality Mode**: Ensures optimal audio quality with intelligent bitrate handling
-- **Multi-core Support**: Utilizes all CPU cores for faster processing
+-- **Parallel Processing**: Multiple books can be processed concurrently; FFmpeg internal threading is automatic
 
 ### 🔧 Advanced Settings
 - **Bitrate Options**: 64, 96, 128, 192, 256, 320 kbps (192 kbps default)
@@ -236,9 +236,8 @@ Examples:
 - **Fast Mode**: 1.5 seconds for 15-file audiobook (stream copy)
 - **Quality Mode**: 30 minutes for 34-file, 545MB audiobook (re-encoding)
 
-### Multi-threading
-- **Automatic**: Uses all available CPU cores (`-threads 0`)
-- **Configurable**: Can be disabled in advanced settings
+### Parallel processing
+- **Parallel book processing**: Multiple books may be processed concurrently using worker threads; FFmpeg's internal threading is managed automatically.
 
 ## 🐛 Troubleshooting
 
@@ -279,7 +278,6 @@ Settings are automatically saved to `~/.audiobook_binder_config.json`:
 {
   "max_bitrate": 192,
   "processing_mode": "quality",
-  "multi_threading": true,
   "remove_commas": true,
   "chapter_style": "auto",
   "sanitization_level": "aggressive",
@@ -301,7 +299,7 @@ Settings are automatically saved to `~/.audiobook_binder_config.json`:
 - 🧹 **Advanced Sanitization** removing commas and special characters
 - 🎛️ **Configurable Settings** with persistent storage
 - 📊 **Progress Tracking** with time estimates
-- 🚀 **Multi-core Support** for faster processing
+- 🚀 **Parallel processing** for faster batch conversion (FFmpeg manages internal threading)
 - 📋 **Batch Mode** for automated processing
 - 🔧 **Advanced Settings** for power users
 
