@@ -10,8 +10,8 @@ A powerful, feature-rich Python script that converts MP3 audiobooks to M4B forma
 - **Real-time Configuration**: All settings saved and persistent across sessions
 
 ### ⚡ Smart Processing
-- **Fast Mode**: Stream copy when possible (no re-encoding for compatible files)
-- **Quality Mode**: Ensures optimal audio quality with intelligent bitrate handling
+- **Auto Mode**: Concatenate `.mp4b` files without re-encoding. Re-encode `.mp3` files. Mixed `.mp3`/`.m4b` folders are ignored.
+- **Force Re-encode Mode**: Always re-encode inputs.
 - **Multi-core Support**: Utilizes all CPU cores for faster processing
 
 ### 🔧 Advanced Settings
@@ -141,8 +141,8 @@ AudioBooks/
 
 ### Quality Optimization
 - **Smart Bitrate**: `min(input_bitrate, max_bitrate_setting)`
-- **Fast Mode**: Stream copy when input ≤ target bitrate (no quality loss)
-- **Quality Mode**: Re-encode only when necessary
+- **Auto Mode**: Copy audio for `.m4b`-only books; re-encode `.mp3` books as needed.
+- **Force Re-encode Mode**: Re-encode all books regardless of input container.
 
 ## 📊 Discovery Preview Example
 
@@ -172,8 +172,8 @@ Proceed with processing? [Y/n]:
 ## ⚙️ Advanced Settings
 
 ### Processing Modes
-- **Fast Mode**: Stream copy when possible, minimal processing time
-- **Quality Mode**: Ensures consistent quality, comprehensive metadata handling
+- **Auto Mode**: `.m4b`-only folders are concatenated with audio copied; `.mp3` folders are re-encoded as before.
+- **Force Re-encode Mode**: Forces re-encoding of all inputs to ensure consistent output and metadata embedding.
 
 ### Chapter Naming Options
 - **Auto**: Smart detection (Disc 1 - Track 1, Chapter 01, etc.)

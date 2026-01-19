@@ -223,13 +223,13 @@ class AudioBookBinderGUI:
         bitrate_combo.grid(row=0, column=1, sticky=tk.W)
         ttk.Label(settings_frame, text="kbps").grid(row=0, column=2, sticky=tk.W, padx=(5, 0))
         
-        # Processing mode
+        # Processing mode (Auto: copy m4b when possible; Force Re-encode: always re-encode)
         ttk.Label(settings_frame, text="Processing Mode:").grid(row=0, column=3, sticky=tk.W, padx=(20, 10))
-        self.mode_var = tk.StringVar(value="fast")
+        self.mode_var = tk.StringVar(value="auto")
         mode_frame = ttk.Frame(settings_frame)
         mode_frame.grid(row=0, column=4, sticky=tk.W)
-        ttk.Radiobutton(mode_frame, text="Fast", variable=self.mode_var, value="fast").grid(row=0, column=0, padx=(0, 10))
-        ttk.Radiobutton(mode_frame, text="Quality", variable=self.mode_var, value="quality").grid(row=0, column=1)
+        ttk.Radiobutton(mode_frame, text="Auto", variable=self.mode_var, value="auto").grid(row=0, column=0, padx=(0, 10))
+        ttk.Radiobutton(mode_frame, text="Force Re-encode", variable=self.mode_var, value="force_reencode").grid(row=0, column=1)
         
         # Advanced settings (second row)
         self.multi_threading_var = tk.BooleanVar(value=True)

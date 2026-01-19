@@ -4,7 +4,15 @@ AudioBook Binder - Enhanced MP3 to M4B Converter
 
 🔧 FULLY FIXED VERSION - All Major Issues Resolved!
 
-Latest Fixes Applied (v2.2 - QuickLook Compatible):
+
+Latest Fixes and Enhancements (v2.3):
+- FIXED: Automatic chapters not being embedded correctly
+- ENHANCEMENT: Customizable metadata extraction from folder names
+- ENHANCEMENT: Use HE-AAC encoding for higher quality at lower bitrates
+- ENHANCEMENT: Customizable output filename templates
+- ENHANCEMENT: Stream copy m4b files when no re-encoding needed
+
+Previous Fixes (v2.2 - QuickLook Compatible):
 - FIXED: QuickLook compatibility - always use AAC encoding for M4A/M4B containers
 - FIXED: M4B brand identifier for proper audiobook recognition
 - FIXED: PNG cover art support for better compatibility
@@ -48,6 +56,7 @@ import shutil
 from pathlib import Path
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, APIC
+from mutagen.mp4 import MP4
 from dataclasses import dataclass, field
 import itertools
 from typing import List, Dict, Optional, Tuple
@@ -61,7 +70,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 class ProcessingSettings:
     """Configuration settings for audio processing"""
     max_bitrate: int = 192
-    processing_mode: str = "fast"  # "fast" or "quality"
+    processing_mode: str = "auto"  # "auto" or "force_reencode"
     multi_threading: bool = True  # FFmpeg internal threading
     parallel_books: bool = True  # Parallel book processing
     max_parallel_books: Optional[int] = None  # Manual override (None = auto n-2)
@@ -445,22 +454,51 @@ class AudioBookBinder:
 
     def collect_audio_files(self, book_folder: Path) -> List[Path]:
         """Collect and sort audio files"""
-        audio_files = []
-        
-        # Check for direct MP3 files
-        direct_mp3s = list(book_folder.glob("*.mp3"))
-        
-        if direct_mp3s:
-            audio_files.extend(sorted(direct_mp3s, key=lambda x: self.natural_sort_key(x.name)))
-        else:
-            # Multi-level structure
-            subfolders = [d for d in book_folder.iterdir() if d.is_dir()]
-            for subfolder in sorted(subfolders, key=lambda x: self.natural_sort_key(x.name)):
-                mp3_files = list(subfolder.glob("*.mp3"))
-                mp3_files.sort(key=lambda x: self.natural_sort_key(x.name))
-                audio_files.extend(mp3_files)
-        
-        return audio_files
+        # Gather MP3 and M4B files from the folder and immediate subfolders.
+        mp3_files = list(book_folder.glob("*.mp3"))
+        m4b_files = list(book_folder.glob("*.m4b"))
+
+        # Include files from immediate subfolders (common multi-disc layouts)
+        for sub in book_folder.iterdir():
+            if sub.is_dir():
+                mp3_files.extend(sub.glob("*.mp3"))
+                m4b_files.extend(sub.glob("*.m4b"))
+
+        # Normalize lists and remove duplicates while preserving order
+        combined = []
+        if mp3_files:
+            combined.extend(mp3_files)
+        if m4b_files:
+            combined.extend(m4b_files)
+
+        # If nothing found, return empty list
+        if not combined:
+            return []
+
+        # Deduplicate preserving order
+        seen = set()
+        unique_files = []
+        for p in combined:
+            try:
+                key = str(p.resolve())
+            except Exception:
+                key = str(p)
+            if key not in seen:
+                seen.add(key)
+                unique_files.append(p)
+
+        # Natural sort by filename
+        unique_files.sort(key=lambda p: self.natural_sort_key(p.name))
+
+        if self.settings.verbose_logging:
+            types = []
+            if mp3_files:
+                types.append(f"MP3s({len(mp3_files)})")
+            if m4b_files:
+                types.append(f"M4Bs({len(m4b_files)})")
+            print(f"Found audio files in {book_folder}: {', '.join(types)}. Total: {len(unique_files)}")
+
+        return unique_files
 
     def extract_metadata(self, mp3_file: Path, book_folder: Path) -> Dict:
         """Extract comprehensive metadata with folder name fallback"""
@@ -913,11 +951,17 @@ class AudioBookBinder:
                 # Find cover art
                 cover_art = self.extract_and_prepare_cover_art(item, audio_files)
                 
-                # Determine processing needed
-                current_bitrate = format_info['bitrate']
-                if self.settings.processing_mode == "fast" and current_bitrate <= self.settings.max_bitrate:
-                    processing = "Stream copy (no re-encoding)"
+                # Determine processing needed based on input types and processing_mode
+                has_mp3 = any(f.suffix.lower() == '.mp3' for f in audio_files)
+                has_m4b = any(f.suffix.lower() == '.m4b' for f in audio_files)
+
+                if has_mp3 and has_m4b:
+                    processing = "Skipped (mixed MP3 and M4B files)"
+                elif has_m4b and not has_mp3 and self.settings.processing_mode == 'auto':
+                    processing = "Stream copy (concat M4B, no re-encoding)"
                 else:
+                    # Re-encode path (mp3 inputs or force_reencode)
+                    current_bitrate = format_info.get('bitrate', self.settings.max_bitrate)
                     if current_bitrate > self.settings.max_bitrate:
                         processing = f"Downsample ({current_bitrate}→{self.settings.max_bitrate} kbps)"
                     else:
@@ -1029,7 +1073,8 @@ class AudioBookBinder:
             print("=" * 50)
             print(f"Current Settings:")
             print(f"  Max Bitrate: {self.settings.max_bitrate} kbps")
-            print(f"  Processing Mode: {self.settings.processing_mode.title()} Mode")
+            mode_label = "Auto" if self.settings.processing_mode == 'auto' else "Force Re-encode"
+            print(f"  Processing Mode: {mode_label} Mode")
             print(f"  Multi-threading: {'Enabled' if self.settings.multi_threading else 'Disabled'}")
             
             # Show parallel processing info
@@ -1058,7 +1103,7 @@ class AudioBookBinder:
             print()
             print("Options:")
             print("1. Change max bitrate")
-            print("2. Toggle processing mode (Fast/Quality)")  
+            print("2. Toggle processing mode (Auto / Force Re-encode)")  
             print("3. Toggle multi-threading (FFmpeg)")
             print("4. Toggle parallel book processing")
             print("5. Output filename format")
@@ -1121,14 +1166,17 @@ class AudioBookBinder:
         time.sleep(1)
 
     def toggle_processing_mode(self):
-        """Toggle between Fast and Quality mode"""
-        if self.settings.processing_mode == "fast":
-            self.settings.processing_mode = "quality"
-            print("✓ Switched to Quality Mode")
+        """Toggle between processing modes:
+        - 'auto': m4b-only books are concatenated with audio copied; mp3 books re-encoded.
+        - 'force_reencode': all books (including m4b-only) are re-encoded.
+        """
+        if self.settings.processing_mode == "auto":
+            self.settings.processing_mode = "force_reencode"
+            print("✓ Switched to Force Re-encode mode")
         else:
-            self.settings.processing_mode = "fast" 
-            print("✓ Switched to Fast Mode")
-        
+            self.settings.processing_mode = "auto"
+            print("✓ Switched to Auto mode")
+
         self.save_settings()
         time.sleep(1)
 
@@ -1508,6 +1556,7 @@ class AudioBookBinder:
             self.discover_audiobooks()
         
         self.clear_screen()
+        print("=" * 50)
         print("🔍 Discovery Results")
         print("=" * 50)
         
@@ -1521,7 +1570,17 @@ class AudioBookBinder:
         
         for i, book in enumerate(self.discovered_books, 1):
             print(f"\n📚 {book.name}")
-            print(f"   📁 Files: {book.file_count} MP3s ({self.format_size(book.total_size)})")
+            # Detect file types to produce an accurate description
+            has_mp3 = any(f.suffix.lower() == '.mp3' for f in book.files)
+            has_m4b = any(f.suffix.lower() == '.m4b' for f in book.files)
+            if has_mp3 and has_m4b:
+                files_label = f"{book.file_count} files (mixed MP3 & M4B)"
+            elif has_m4b and not has_mp3:
+                files_label = f"{book.file_count} M4B files"
+            else:
+                files_label = f"{book.file_count} MP3s"
+
+            print(f"   📁 Files: {files_label} ({self.format_size(book.total_size)})")
             
             format_str = f"{book.format_info['codec'].upper()}, {book.format_info['bitrate']} kbps"
             if book.format_info['channels'] == 1:
@@ -1556,8 +1615,8 @@ class AudioBookBinder:
         cover_count = sum(1 for book in self.discovered_books if book.cover_art)
         print(f"🖼️  Cover art found: {cover_count}/{len(self.discovered_books)}")
         
-        # Estimate processing time
-        avg_speed = 0.5 if self.settings.processing_mode == "fast" else 0.3  # MB/s
+        # Estimate processing time (auto assumed faster when copying M4B)
+        avg_speed = 0.5 if self.settings.processing_mode == "auto" else 0.3  # MB/s
         est_time_sec = total_size / (1024 * 1024) / avg_speed
         est_time_min = est_time_sec / 60
         
@@ -1696,8 +1755,17 @@ class AudioBookBinder:
         current_time = 0
         for i, audio_file in enumerate(audio_files):
             try:
-                audio = MP3(audio_file)
-                duration_ms = int(audio.info.length * 1000)
+                # Try MP3 first, then MP4 (m4b) as a fallback
+                try:
+                    audio = MP3(audio_file)
+                    duration_ms = int(audio.info.length * 1000)
+                except Exception:
+                    # Try MP4 container (m4b) for duration
+                    try:
+                        audio4 = MP4(str(audio_file))
+                        duration_ms = int(audio4.info.length * 1000)
+                    except Exception:
+                        raise
                 
                 # Chapter naming based on settings
                 if self.settings.chapter_style == "filename":
@@ -1820,15 +1888,26 @@ class AudioBookBinder:
         """Calculate total duration of all audio files in seconds"""
         total_duration = 0.0
         for audio_file in audio_files:
+            # Try MP3 first
             try:
                 audio = MP3(audio_file)
                 total_duration += audio.info.length
+                continue
+            except Exception:
+                pass
+
+            # Then try MP4/m4b
+            try:
+                audio4 = MP4(str(audio_file))
+                total_duration += audio4.info.length
+                continue
             except Exception as e:
                 if self.settings.verbose_logging:
                     print(f"Warning: Could not get duration for {audio_file}: {e}")
-                # Use file size as rough estimate (1MB ≈ 1 minute for typical audiobooks)
+                # Fall back to rough estimate based on file size (1MB ≈ 1 minute)
                 file_size_mb = audio_file.stat().st_size / (1024 * 1024)
-                total_duration += file_size_mb * 60  # Rough estimate
+                total_duration += file_size_mb * 60
+
         return total_duration
 
     def parse_ffmpeg_progress(self, line: str, progress: ConversionProgress) -> bool:
@@ -2139,11 +2218,49 @@ class AudioBookBinder:
                 print("   Install an ffmpeg build with libfdk_aac or switch the audio encoder in Advanced Settings.")
                 return False
 
-        # Always use AAC encoding for QuickLook compatibility
-        # QuickLook requires AAC audio in M4A/M4B containers
-        current_bitrate = book_info.format_info['bitrate']
-        target_bitrate = min(current_bitrate, self.settings.max_bitrate)
-        print(f"🎧 Converting to AAC for QuickLook compatibility: {target_bitrate} kbps")
+        # Determine input file types (mp3 vs m4b)
+        has_mp3 = any(f.suffix.lower() == '.mp3' for f in book_info.files)
+        has_m4b = any(f.suffix.lower() == '.m4b' for f in book_info.files)
+
+        # Mixed input types are not supported by the new modes
+        if has_mp3 and has_m4b:
+            print(f"⚠️  Skipping '{book_info.name}': contains mixed MP3 and M4B files. Set a consistent folder format.")
+            return False
+
+        is_m4b_only = has_m4b and not has_mp3
+
+        # In 'auto' mode, M4B-only books are concatenated with audio copied.
+        copy_audio_only = is_m4b_only and self.settings.processing_mode == 'auto'
+
+        # If inputs are M4B, try to populate metadata from the first file when missing
+        if is_m4b_only:
+            try:
+                first_mp4 = MP4(str(book_info.files[0]))
+                tags = first_mp4.tags or {}
+                # Mutagen MP4 keys: '\xa9nam' (title), '\xa9ART' (artist), '\xa9day' (date), '©gen'/'gnre' (genre)
+                if not book_info.metadata.get('title'):
+                    book_info.metadata['title'] = tags.get('\xa9nam', [book_info.metadata.get('title')])[0]
+                if not book_info.metadata.get('artist'):
+                    book_info.metadata['artist'] = tags.get('\xa9ART', [book_info.metadata.get('artist')])[0]
+                if not book_info.metadata.get('year'):
+                    book_info.metadata['year'] = tags.get('\xa9day', [book_info.metadata.get('year')])[0]
+                if not book_info.metadata.get('genre'):
+                    # try common genre keys
+                    book_info.metadata['genre'] = tags.get('©gen', tags.get('gnre', [book_info.metadata.get('genre')]))[0]
+            except Exception:
+                # Non-fatal: continue, metadata may already be populated from discovery
+                if self.settings.verbose_logging:
+                    print(f"⚠️  Could not extract MP4 tags for {book_info.files[0]}")
+
+        # For non-copy mode we still may re-encode to AAC for QuickLook
+        if not copy_audio_only:
+            # Always use AAC encoding for QuickLook compatibility
+            # QuickLook requires AAC audio in M4A/M4B containers
+            current_bitrate = book_info.format_info.get('bitrate', self.settings.max_bitrate)
+            target_bitrate = min(current_bitrate, self.settings.max_bitrate)
+            print(f"🎧 Converting to AAC for QuickLook compatibility: {target_bitrate} kbps")
+        else:
+            print("🎧 Concatenating M4B inputs without re-encoding audio (copying audio stream)")
         
         # Setup paths
         output_path = self.output_dir / book_info.output_filename
@@ -2195,17 +2312,21 @@ class AudioBookBinder:
         cmd.extend(['-map_chapters', str(chapter_input_index)])
         
         # ENCODING OPTIONS FOR QUICKLOOK COMPATIBILITY
-        # Always use AAC audio encoding for QuickLook compatibility
-        # Choose encoder/profile based on user setting (defaults to builtin AAC)
-        audio_codec = getattr(self.settings, 'audio_codec', 'aac')
-        if audio_codec == 'libfdk_aac':
-            # Use libfdk_aac with HE profile when available
-            cmd.extend(['-c:a', 'libfdk_aac', '-b:a', f'{target_bitrate}k','-afterburner', '1'])
-            cmd.extend(['-profile:a', 'aac_he'])
+        # Choose audio handling: copy or encode
+        if copy_audio_only:
+            cmd.extend(['-c:a', 'copy'])
         else:
-            # Default: builtin AAC (AAC-LC) for maximum compatibility
-            cmd.extend(['-c:a', 'aac', '-b:a', f'{target_bitrate}k'])
-            cmd.extend(['-profile:a', 'aac_low'])
+            # Always use AAC audio encoding for QuickLook compatibility
+            # Choose encoder/profile based on user setting (defaults to builtin AAC)
+            audio_codec = getattr(self.settings, 'audio_codec', 'aac')
+            if audio_codec == 'libfdk_aac':
+                # Use libfdk_aac with HE profile when available
+                cmd.extend(['-c:a', 'libfdk_aac', '-b:a', f'{target_bitrate}k','-afterburner', '1'])
+                cmd.extend(['-profile:a', 'aac_he'])
+            else:
+                # Default: builtin AAC (AAC-LC) for maximum compatibility
+                cmd.extend(['-c:a', 'aac', '-b:a', f'{target_bitrate}k'])
+                cmd.extend(['-profile:a', 'aac_low'])
         
         # Video encoding for cover art (use PNG codec for better compatibility)
         if cover_input_index is not None:
@@ -2584,7 +2705,8 @@ class AudioBookBinder:
         # Process all
         print(f"\n🚀 Processing with current settings...")
         print(f"   Max bitrate: {self.settings.max_bitrate} kbps")
-        print(f"   Mode: {self.settings.processing_mode.title()}")
+        mode_label = "Auto" if self.settings.processing_mode == 'auto' else "Force Re-encode"
+        print(f"   Mode: {mode_label}")
         
         self.process_all_audiobooks()
 
@@ -2630,7 +2752,7 @@ Examples:
     parser.add_argument(
         "--fast", 
         action="store_true",
-        help="Use fast mode (stream copy when possible)"
+        help="Use auto processing mode (concat M4B without re-encoding when possible)"
     )
     
     parser.add_argument(
@@ -2664,7 +2786,7 @@ Examples:
         binder.settings.max_bitrate = args.bitrate
     
     if args.fast:
-        binder.settings.processing_mode = "fast"
+        binder.settings.processing_mode = "auto"
     
     if args.verbose:
         binder.settings.verbose_logging = True
