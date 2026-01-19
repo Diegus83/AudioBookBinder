@@ -78,6 +78,9 @@ class ProcessingSettings:
     # Folder metadata template: token order and delimiter
     folder_metadata_template: List[str] = field(default_factory=lambda: ['artist', 'title', 'year'])
     folder_metadata_delimiter: str = " - "
+    # Output filename template: ordered list of tokens (artist/title/year)
+    output_filename_template: List[str] = field(default_factory=lambda: ['artist', 'year','title'])
+    output_filename_delimiter: str = " - "
 
 @dataclass
 class ConversionProgress:
@@ -185,7 +188,9 @@ class AudioBookBinder:
             'progress_style': self.settings.progress_style,
             'audio_codec': getattr(self.settings, 'audio_codec', 'aac'),
             'folder_metadata_template': getattr(self.settings, 'folder_metadata_template', ['artist', 'title', 'year']),
-            'folder_metadata_delimiter': getattr(self.settings, 'folder_metadata_delimiter', ' - ')
+            'folder_metadata_delimiter': getattr(self.settings, 'folder_metadata_delimiter', ' - '),
+            'output_filename_template': getattr(self.settings, 'output_filename_template', ['artist', 'title']),
+            'output_filename_delimiter': getattr(self.settings, 'output_filename_delimiter', ' - ')
         }
         
         with open(config_file, 'w') as f:
@@ -918,31 +923,80 @@ class AudioBookBinder:
                     else:
                         processing = f"Re-encode ({current_bitrate}→{self.settings.max_bitrate} kbps)"
                 
-                # Generate output filename with length limits (metadata already cleaned)
-                artist = self.sanitize_filename(metadata['artist'])
-                title = self.sanitize_filename(metadata['title'])
-                
-                # Limit total filename length to avoid filesystem/FFmpeg issues
-                max_filename_length = 200  # Safe limit for most filesystems
-                base_filename = f"{artist} - {title}"
-                
-                if len(base_filename) > max_filename_length - 4:  # -4 for ".m4b"
-                    # Truncate title if too long, preserving artist
-                    max_title_length = max_filename_length - len(artist) - 7  # -7 for " - " and ".m4b"
-                    if max_title_length > 20:  # Ensure we have reasonable space for title
-                        title = title[:max_title_length].rstrip(' .')
-                        if self.settings.verbose_logging:
-                            print(f"📝 Truncated long title to: {title}")
+                # Generate output filename from user-configurable template
+                allowed_tokens = ['artist', 'title', 'year']
+                template = getattr(self.settings, 'output_filename_template', ['artist', 'title'])
+                sep = getattr(self.settings, 'output_filename_delimiter', ' - ')
+
+                # Build sanitized token values; treat sanitized 'Unknown' as missing
+                token_values: Dict[str, str] = {}
+                for tok in allowed_tokens:
+                    raw = metadata.get(tok, '') or ''
+                    if raw:
+                        val = self.sanitize_filename(raw)
+                        if val and val != 'Unknown':
+                            token_values[tok] = val
+
+                # Build included token list according to template
+                included = [token_values[t] for t in template if t in token_values]
+
+                # Fallback when nothing available: prefer title, then artist, else 'Unknown'
+                if not included:
+                    fallback = ''
+                    if 'title' in token_values:
+                        fallback = token_values['title']
+                    elif 'artist' in token_values:
+                        fallback = token_values['artist']
                     else:
-                        # If artist is very long, truncate both
-                        max_artist_length = 60
-                        max_title_length = max_filename_length - max_artist_length - 7
-                        artist = artist[:max_artist_length].rstrip(' .')
-                        title = title[:max_title_length].rstrip(' .')
+                        fallback = 'Unknown'
+                    base = fallback
+                else:
+                    base = sep.join(included)
+
+                # Enforce safe max length (reserve for '.m4b')
+                max_filename_length = 200
+                max_base_len = max_filename_length - 4
+
+                # Truncate if too long: prefer truncating title, else last included token
+                if len(base) > max_base_len:
+                    parts = included[:]  # copy of included token values in order
+                    # helper to recompute base
+                    def recompute(parts_list):
+                        return sep.join(parts_list) if parts_list else ''
+
+                    total = len(recompute(parts))
+                    # Try truncating title first if present
+                    if 'title' in template and 'title' in token_values and 'title' in [t for t in template if t in token_values]:
+                        # find index of title in included
+                        try:
+                            idx = [t for t in template if t in token_values].index('title')
+                        except ValueError:
+                            idx = None
+                    else:
+                        idx = None
+
+                    # Loop until fits or cannot reduce further
+                    while len(recompute(parts)) > max_base_len and any(len(p) > 1 for p in parts):
+                        excess = len(recompute(parts)) - max_base_len
+                        # choose index to truncate
+                        if idx is not None and len(parts[idx]) > 1:
+                            i = idx
+                        else:
+                            i = len(parts) - 1  # last included token
+
+                        cur = parts[i]
+                        # reduce by at most excess, leaving at least 1 char
+                        reduce_by = min(excess, max(1, len(cur) - 1))
+                        new_len = max(1, len(cur) - reduce_by)
+                        parts[i] = parts[i][:new_len].rstrip(' .')
                         if self.settings.verbose_logging:
-                            print(f"📝 Truncated long artist and title")
-                
-                output_filename = f"{artist} - {title}.m4b"
+                            print(f"📝 Truncated token at index {i} to '{parts[i]}' to fit filename length")
+
+                    base = recompute(parts)
+
+                # Final cleanup and extension
+                base = base.rstrip(' .')
+                output_filename = f"{base}.m4b"
                 
                 book_info = AudioBookInfo(
                     name=item.name,
@@ -986,22 +1040,33 @@ class AudioBookBinder:
             encoder_display = getattr(self.settings, 'audio_codec', 'aac')
             encoder_label = 'Builtin AAC (aac_low)' if encoder_display == 'aac' else 'libfdk_aac (aac_he)'
             print(f"  Audio encoder: {encoder_label}")
+            # Display output filename convention and folder metadata parsing template
+            template = getattr(self.settings, 'output_filename_template', ['artist', 'title'])
+            sep = getattr(self.settings, 'output_filename_delimiter', ' - ')
+            template_str = sep.join([f"{{{t}}}" for t in template])
+            print(f"  Output filename: {template_str}.m4b")
+
+            folder_template = getattr(self.settings, 'folder_metadata_template', ['artist', 'title', 'year'])
+            folder_sep = getattr(self.settings, 'folder_metadata_delimiter', ' - ')
+            folder_template_str = folder_sep.join([f"{{{t}}}" for t in folder_template])
+            print(f"  Folder metadata parsing: {folder_template_str}")
             print()
             print("Options:")
             print("1. Change max bitrate")
             print("2. Toggle processing mode (Fast/Quality)")  
             print("3. Toggle multi-threading (FFmpeg)")
             print("4. Toggle parallel book processing")
-            print("5. Advanced settings")
-            print("6. Preview discovery results")
-            print("7. Start processing ⭐ (Default - just press Enter)")
-            print("8. Exit")
+            print("5. Output filename format")
+            print("6. Advanced settings")
+            print("7. Preview discovery results")
+            print("8. Start processing ⭐ (Default - just press Enter)")
+            print("0. Exit")
             print()
             
-            choice = input("Choice [1-8 or just press Enter to start]: ").strip().replace('\r', '')
+            choice = input("Choice [1-9 or just press Enter to start]: ").strip().replace('\r', '')
             
-            # Default to start processing on Enter
-            if choice == "" or choice == "7":
+            # Default to start processing on Enter (now option #8)
+            if choice == "" or choice == "8":
                 if self.discovered_books:
                     return True  # Start processing
                 else:
@@ -1017,10 +1082,12 @@ class AudioBookBinder:
             elif choice == "4":
                 self.toggle_parallel_processing()
             elif choice == "5":
-                self.advanced_settings_menu()
+                self.change_output_filename_format()
             elif choice == "6":
+                self.advanced_settings_menu()
+            elif choice == "7":
                 self.show_discovery_results()
-            elif choice == "8":
+            elif choice == "0":
                 return False  # Exit
             else:
                 print("Invalid choice. Please try again.")
@@ -1077,7 +1144,7 @@ class AudioBookBinder:
             encoder_display = getattr(self.settings, 'audio_codec', 'aac')
             encoder_label = 'Builtin AAC (aac_low)' if encoder_display == 'aac' else 'libfdk_aac (aac_he)'
             print(f"8. Audio encoder: {encoder_label}")
-            print("9. Filename token order & separator")
+            print("9. Input filename parser settings")
             print("0. Back to main menu")
 
             choice = input("\nChoice [1-0]: ").strip()
@@ -1273,6 +1340,116 @@ class AudioBookBinder:
             # Persist
             self.settings.folder_metadata_template = found_tokens
             self.settings.folder_metadata_delimiter = sep
+            self.save_settings()
+            print(f"✓ Template saved. Token order: {found_tokens}, Separator: '{sep}'")
+            time.sleep(1)
+            break
+
+    def change_output_filename_format(self):
+        """Edit the output .m4b filename template (tokens and delimiter)"""
+        allowed_tokens = ['artist', 'title', 'year']
+        shorthand_map = {'a': 'artist', 't': 'title', 'y': 'year'}  # case-sensitive
+
+        def build_template_from_settings():
+            order = getattr(self.settings, 'output_filename_template', ['artist', 'title'])
+            sep = getattr(self.settings, 'output_filename_delimiter', ' - ')
+            return sep.join([f"{{{t}}}" for t in order])
+
+        while True:
+            self.clear_screen()
+            print("🔤 Output Filename Format")
+            print("=" * 30)
+            current_template = build_template_from_settings()
+            print(f"Current template: {current_template}")
+            print(f"Available tokens: {', '.join(['{'+t+'}' for t in allowed_tokens])}")
+            print(f"Shorthand letters: {', '.join([k+':'+v for k,v in shorthand_map.items()])} (case-sensitive)")
+            print()
+            print("Enter a template using either full tokens ({artist}) or shorthand letters (a-t-y).")
+            print("Any text in [brackets] will be ignored. Leave empty to cancel.")
+            user = input("Template: ").strip()
+            if user == "":
+                print("Cancelled")
+                time.sleep(1)
+                break
+
+            # Remove bracketed text (and surrounding spaces)
+            cleaned = re.sub(r"\[.*?\]", "", user)
+
+            # First try full-token syntax {token}
+            if '{' in cleaned:
+                found = re.findall(r"\{([^}]+)\}", cleaned)
+                if not found:
+                    print("❌ No tokens found in template. Use tokens like {artist}.")
+                    time.sleep(1)
+                    continue
+
+                # Validate tokens
+                unknown = [t for t in found if t not in allowed_tokens]
+                if unknown:
+                    print(f"❌ Unknown tokens: {unknown}. Allowed: {allowed_tokens}")
+                    time.sleep(2)
+                    continue
+
+                # Check duplicates
+                if len(found) != len(set(found)):
+                    dup = [t for t in set(found) if found.count(t) > 1]
+                    print(f"❌ Duplicate tokens found in template: {dup}")
+                    time.sleep(2)
+                    continue
+
+                # Infer separator from text between {tokens}
+                parts = re.split(r"\{[^}]+\}", cleaned)
+                middles = [p for p in parts[1:-1] if p.strip() != '']
+                if middles:
+                    sep = middles[0].strip()
+                else:
+                    sep = getattr(self.settings, 'output_filename_delimiter', ' - ')
+
+                # Persist
+                self.settings.output_filename_template = found
+                self.settings.output_filename_delimiter = sep
+                self.save_settings()
+                print(f"✓ Template saved. Token order: {found}, Separator: '{sep}'")
+                time.sleep(1)
+                break
+
+            # Else try shorthand letters (case-sensitive)
+            letters = re.findall(r"\b([A-Za-z])\b", cleaned)
+            if not letters:
+                print("❌ No shorthand tokens found. Use letters like a, t, y or full tokens {artist}.")
+                time.sleep(1)
+                continue
+
+            # Validate letters: must be in shorthand_map and match case
+            unknown_letters = [l for l in letters if l not in shorthand_map]
+            if unknown_letters:
+                print(f"❌ Unknown shorthand tokens: {unknown_letters}. Allowed: {list(shorthand_map.keys())}")
+                time.sleep(2)
+                continue
+
+            # Check duplicates
+            if len(letters) != len(set(letters)):
+                dup = [l for l in set(letters) if letters.count(l) > 1]
+                print(f"❌ Duplicate shorthand tokens found: {dup}")
+                time.sleep(2)
+                continue
+
+            # Build token order from letters
+            found_tokens = [shorthand_map[l] for l in letters]
+
+            # Infer separator: replace single-letter tokens with a marker and split
+            marker = "{X}"
+            temp = re.sub(r"\b([A-Za-z])\b", marker, cleaned)
+            parts = temp.split(marker)
+            middles = [p for p in parts[1:-1] if p.strip() != '']
+            if middles:
+                sep = middles[0].strip()
+            else:
+                sep = getattr(self.settings, 'output_filename_delimiter', ' - ')
+
+            # Persist
+            self.settings.output_filename_template = found_tokens
+            self.settings.output_filename_delimiter = sep
             self.save_settings()
             print(f"✓ Template saved. Token order: {found_tokens}, Separator: '{sep}'")
             time.sleep(1)
