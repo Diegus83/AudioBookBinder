@@ -34,15 +34,15 @@
 Current Settings:
   Max Bitrate: 192 kbps
   Processing Mode: Quality Mode
-  Multi-threading: Enabled
+  Parallel book processing: Enabled
   Remove Commas: Yes
   Sanitization: Aggressive
 
 Options:
 1. Change max bitrate (64-320 kbps)
 2. Toggle processing mode (Fast/Quality)  
-3. Toggle multi-threading
-4. Advanced settings
+3. Advanced settings
+4. Preview discovery results
 5. Preview discovery results ← SEE BEFORE PROCESSING!
 6. Start processing
 7. Exit
@@ -125,7 +125,7 @@ AudioBooks/
 - **⚡ Fast Mode** - Stream copy for compatible files (seconds vs minutes!)
 - **🖼️ Cover Art Verification** - Confirms artwork was properly embedded
 - **🧹 Smart Sanitization** - Removes commas, special chars from filenames
-- **🚀 Multi-core Processing** - Uses all CPU cores for faster encoding
+- **🚀 Parallel book processing** - Multiple books processed concurrently for faster batch runs
 - **📊 Progress Tracking** - Real-time updates with time estimates
 - **⚙️ Persistent Settings** - Your preferences saved between sessions
 

@@ -232,14 +232,11 @@ class AudioBookBinderGUI:
         ttk.Radiobutton(mode_frame, text="Force Re-encode", variable=self.mode_var, value="force_reencode").grid(row=0, column=1)
         
         # Advanced settings (second row)
-        self.multi_threading_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(settings_frame, text="Multi-threading", variable=self.multi_threading_var).grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
-        
         self.parallel_books_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(settings_frame, text="Parallel processing", variable=self.parallel_books_var).grid(row=1, column=1, sticky=tk.W, pady=(10, 0))
+        ttk.Checkbutton(settings_frame, text="Parallel processing", variable=self.parallel_books_var).grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
         
         self.remove_commas_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(settings_frame, text="Remove commas", variable=self.remove_commas_var).grid(row=1, column=2, sticky=tk.W, pady=(10, 0))
+        ttk.Checkbutton(settings_frame, text="Remove commas", variable=self.remove_commas_var).grid(row=1, column=1, sticky=tk.W, pady=(10, 0))
 
     def create_books_panel(self, parent):
         """Create the discovered books display panel"""
@@ -356,7 +353,6 @@ class AudioBookBinderGUI:
         return ProcessingSettings(
             max_bitrate=int(self.bitrate_var.get()),
             processing_mode=self.mode_var.get(),
-            multi_threading=self.multi_threading_var.get(),
             parallel_books=self.parallel_books_var.get(),
             remove_commas=self.remove_commas_var.get(),
             show_progress=False,  # We handle progress in GUI
