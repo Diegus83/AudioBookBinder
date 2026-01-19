@@ -1017,6 +1017,11 @@ class AudioBookBinder:
     def show_settings_menu(self):
         """Display and handle settings menu"""
         while True:
+            # Ensure terminal is in a clean state before drawing menu
+            try:
+                self.cleanup_terminal_state()
+            except Exception:
+                pass
             self.clear_screen()
             print("📚 AudioBook Binder - Settings")
             print("=" * 50)
@@ -1564,10 +1569,22 @@ class AudioBookBinder:
         print(f"⏱️  Estimated time: {time_str}")
         
         # Ask if user wants to see detailed file order
+        # Reset terminal from any previous progress output before prompting
+        try:
+            self.cleanup_terminal_state()
+        except Exception:
+            pass
+
         print(f"\nShow detailed file order for each audiobook? [y/N]: ", end="")
         if input().lower() in ['y', 'yes']:
             self.show_detailed_file_order()
         
+        # Ensure a clean line before asking to proceed
+        try:
+            self.cleanup_terminal_state()
+        except Exception:
+            pass
+
         print("\nProceed with processing? [Y/n]: ", end="")
         if input().lower() in ['', 'y', 'yes']:
             return True
@@ -1650,6 +1667,10 @@ class AudioBookBinder:
         print("   • You can change chapter naming in Advanced Settings")
         print("   • Check that the file order matches your expected listening sequence")
         
+        try:
+            self.cleanup_terminal_state()
+        except Exception:
+            pass
         input("\nPress Enter to continue...")
 
     def format_size(self, size_bytes: int) -> str:
