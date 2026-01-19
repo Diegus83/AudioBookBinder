@@ -933,23 +933,21 @@ class AudioBookBinder:
                 for tok in allowed_tokens:
                     raw = metadata.get(tok, '') or ''
                     if raw:
-                        val = self.sanitize_filename(raw)
-                        if val and val != 'Unknown':
-                            token_values[tok] = val
+                        sanitized = self.sanitize_filename(raw)
+                        if sanitized and sanitized.lower() != 'unknown':
+                            token_values[tok] = sanitized
 
                 # Build included token list according to template
                 included = [token_values[t] for t in template if t in token_values]
 
                 # Fallback when nothing available: prefer title, then artist, else 'Unknown'
                 if not included:
-                    fallback = ''
-                    if 'title' in token_values:
-                        fallback = token_values['title']
-                    elif 'artist' in token_values:
-                        fallback = token_values['artist']
+                    if token_values.get('title'):
+                        base = token_values['title']
+                    elif token_values.get('artist'):
+                        base = token_values['artist']
                     else:
-                        fallback = 'Unknown'
-                    base = fallback
+                        base = 'Unknown'
                 else:
                     base = sep.join(included)
 
@@ -2097,7 +2095,7 @@ class AudioBookBinder:
             print(f"\n❌ Error running FFmpeg with progress: {e}")
             return False
 
-    def create_m4b(self, book_info: AudioBookInfo, current_book: int = 1, total_books: int = 1) -> bool:
+    def create_m4b(self, book_info: AudioBookInfo, current_book: int = 1, total_books: int = 1, ffmpeg_threads: Optional[int] = None) -> bool:
         """Create M4B file with enhanced processing for QuickLook compatibility"""
         thread_name = threading.current_thread().name
         thread_id = threading.current_thread().ident
@@ -2146,9 +2144,12 @@ class AudioBookBinder:
         # Build FFmpeg command optimized for QuickLook compatibility
         cmd = ['ffmpeg']
         
-        # Multi-threading
-        if self.settings.multi_threading:
-            cmd.extend(['-threads', '0'])
+        # Determine threads to pass to FFmpeg.
+        # Priority: explicit `ffmpeg_threads` argument > settings.multi_threading
+        # When multi_threading is True and ffmpeg_threads is None -> use 0 (auto)
+        # When multi_threading is False and ffmpeg_threads is None -> use 1 (force single-thread)
+        threads_to_use = ffmpeg_threads if ffmpeg_threads is not None else (0 if self.settings.multi_threading else 1)
+        cmd.extend(['-threads', str(threads_to_use)])
         
         # ALL INPUTS FIRST (this is critical for FFmpeg)
         # Input 0: Audio files via concat
@@ -2446,25 +2447,18 @@ class AudioBookBinder:
             # Set custom thread name based on book title
             custom_thread_name = self.create_thread_name(book_info)
             threading.current_thread().name = custom_thread_name
-            
-            # Limit FFmpeg threads per worker to prevent CPU oversubscription
-            if self.settings.multi_threading:
-                # Temporarily disable multi-threading for individual workers
-                # since we're already parallelizing at the book level
-                original_threading = self.settings.multi_threading
-                self.settings.multi_threading = False
-                
-                try:
-                    success = self.create_m4b(book_info, current_book=book_index, 
-                                            total_books=len(self.discovered_books))
-                finally:
-                    # Restore original threading setting
-                    self.settings.multi_threading = original_threading
-                
-                return success
-            else:
-                return self.create_m4b(book_info, current_book=book_index, 
-                                     total_books=len(self.discovered_books))
+            # Avoid mutating shared settings inside worker threads. Instead,
+            # pass an explicit per-worker thread limit to create_m4b.
+            per_worker_threads = 1 if self.settings.multi_threading else None
+            try:
+                return self.create_m4b(
+                    book_info,
+                    current_book=book_index,
+                    total_books=len(self.discovered_books),
+                    ffmpeg_threads=per_worker_threads
+                )
+            except Exception:
+                return False
         
         # Create thread pool with optimal worker count
         max_workers = self.get_optimal_worker_count()
